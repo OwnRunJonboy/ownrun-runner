@@ -1,11 +1,12 @@
 # ownrun-runner
 
-Python service that runs on your home computer. It polls the OwnRun server for jobs, executes them against local Ollama, and uploads results.
+Python service that runs on your home computer. It polls the OwnRun server for jobs, executes them against local Ollama (and Autogen AgentChat for agent jobs), and uploads results.
 
 ## Requirements
 
 - Python 3.10+
 - Ollama running on localhost (default `http://127.0.0.1:11434`)
+- For agent jobs: a tools-capable model (e.g. `llama3.2`, `qwen2.5`)
 
 ## Install
 
@@ -33,6 +34,10 @@ Environment variables:
 | `OLLAMA_BASE_URL` | no | `http://127.0.0.1:11434` | Ollama API base |
 | `OWNRUN_JOB_TIMEOUT` | no | `3600` | Per-job Ollama timeout (seconds) |
 | `OWNRUN_UPLOAD_RETRIES` | no | `5` | Retries for complete/fail uploads |
+| `OWNRUN_AGENT_WORKSPACE` | no | `~/ownrun-workspace` | Sandbox root for agent file tools |
+| `OWNRUN_AGENT_PROFILES` | no | `workspace,web,workspace_web` | Enabled agent profiles |
+| `OWNRUN_AGENT_WALL_CLOCK` | no | `1200` | Max seconds per agent job |
+| `OWNRUN_AGENT_FETCH_TIMEOUT` | no | `15` | HTTP fetch timeout (seconds) |
 
 ## Run
 
@@ -42,36 +47,10 @@ export OWNRUN_RUNNER_TOKEN=your-runner-token
 python run.py
 ```
 
-## systemd (optional)
-
-```ini
-[Unit]
-Description=OwnRun runner
-After=network.target
-
-[Service]
-Type=simple
-Environment=OWNRUN_SERVER_URL=https://your-domain.com
-Environment=OWNRUN_RUNNER_TOKEN=your-runner-token
-ExecStart=/path/to/.venv/bin/python /path/to/ownrun-runner/run.py
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-```
-
-Save as `~/.config/systemd/user/ownrun-runner.service`, then:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now ownrun-runner
-```
-
 ## Behavior
 
-- Sends heartbeat every poll interval with current Ollama model list
+- Sends heartbeat every poll interval with Ollama models plus agent profiles / tool-capable models
 - Claims one job at a time
-- Sends job heartbeats every 30s while running
-- Supports `ollama.chat` jobs (non-streaming `/api/chat`)
-- Reports failures clearly (Ollama down, missing model, timeout)
+- Sends job heartbeats every 30s while running (response may request cancel)
+- Supports `ollama.chat` and `agent.task` jobs
+- Agent jobs use Autogen AgentChat + sandboxed tools; progress traces upload while running

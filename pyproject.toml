@@ -5,6 +5,8 @@ description = "OwnRun home runner — polls for jobs and runs Ollama locally"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31.0",
+    "autogen-agentchat==0.7.5",
+    "autogen-ext[ollama]==0.7.5",
 ]
 
 [project.scripts]

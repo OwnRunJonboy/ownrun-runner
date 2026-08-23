@@ -75,10 +75,19 @@ class ServerClient:
             raise last_error
         return None
 
-    def heartbeat(self, models: list[str] | None = None) -> None:
+    def heartbeat(
+        self,
+        models: list[str] | None = None,
+        agent_profiles: list[str] | None = None,
+        agent_models: list[str] | None = None,
+    ) -> None:
         body: dict[str, Any] = {}
         if models is not None:
             body["available_models"] = models
+        if agent_profiles is not None:
+            body["agent_profiles"] = agent_profiles
+        if agent_models is not None:
+            body["agent_models"] = agent_models
         self._request("POST", "/runner/heartbeat", json=body)
 
     def claim(self) -> dict[str, Any] | None:
@@ -88,8 +97,18 @@ class ServerClient:
         job = data.get("job")
         return job if isinstance(job, dict) else None
 
-    def job_heartbeat(self, job_id: int) -> None:
-        self._request("POST", f"/runner/jobs/{job_id}/heartbeat", json={})
+    def job_heartbeat(self, job_id: int) -> bool:
+        """Extend lease. Returns True if cancel was requested."""
+        data = self._request("POST", f"/runner/jobs/{job_id}/heartbeat", json={}) or {}
+        return bool(data.get("cancel_requested"))
+
+    def progress(self, job_id: int, result: dict[str, Any]) -> None:
+        self._request(
+            "POST",
+            f"/runner/jobs/{job_id}/progress",
+            json={"result": result},
+            retries=1,
+        )
 
     def complete(self, job_id: int, result: dict[str, Any]) -> None:
         self._with_upload_retries(

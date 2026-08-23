@@ -1,1 +1,3 @@
 requests>=2.31.0
+autogen-agentchat==0.7.5
+autogen-ext[ollama]==0.7.5
