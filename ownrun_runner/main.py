@@ -6,7 +6,10 @@ import threading
 import time
 from typing import Any
 
+from pathlib import Path
+
 from ownrun_runner.agent import agent_capable_models, run_agent_task
+from ownrun_runner.agent.tools import list_projects
 from ownrun_runner.client import ServerClient
 from ownrun_runner.config import Config
 from ownrun_runner.ollama import list_models, run_ollama_chat
@@ -26,15 +29,18 @@ def _heartbeat_loop(client: ServerClient, config: Config) -> None:
         try:
             models = list_models(config)
             agent_models = agent_capable_models(models)
+            projects = list_projects(Path(config.agent_workspace))
             client.heartbeat(
                 models,
                 agent_profiles=list(config.agent_profiles),
                 agent_models=agent_models,
+                agent_projects=projects,
             )
             log.debug(
-                "Heartbeat sent (%d models, %d agent-capable, profiles=%s)",
+                "Heartbeat sent (%d models, %d agent-capable, %d projects, profiles=%s)",
                 len(models),
                 len(agent_models),
+                len(projects),
                 ",".join(config.agent_profiles),
             )
         except Exception as e:

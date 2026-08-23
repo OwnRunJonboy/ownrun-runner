@@ -80,6 +80,7 @@ class ServerClient:
         models: list[str] | None = None,
         agent_profiles: list[str] | None = None,
         agent_models: list[str] | None = None,
+        agent_projects: list[str] | None = None,
     ) -> None:
         body: dict[str, Any] = {}
         if models is not None:
@@ -88,6 +89,8 @@ class ServerClient:
             body["agent_profiles"] = agent_profiles
         if agent_models is not None:
             body["agent_models"] = agent_models
+        if agent_projects is not None:
+            body["agent_projects"] = agent_projects
         self._request("POST", "/runner/heartbeat", json=body)
 
     def claim(self) -> dict[str, Any] | None:

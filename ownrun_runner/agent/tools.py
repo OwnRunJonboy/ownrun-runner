@@ -60,6 +60,48 @@ def _html_to_text(html: str) -> str:
     return parser.text()
 
 
+PROJECT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+
+
+def validate_project_name(name: str) -> str:
+    cleaned = (name or "").strip()
+    if not PROJECT_NAME_RE.fullmatch(cleaned):
+        raise ValueError(
+            "Invalid project name: use 1–64 chars starting with a letter or digit; "
+            "only letters, digits, '.', '_', and '-' allowed"
+        )
+    return cleaned
+
+
+def list_projects(workspace_root: Path) -> list[str]:
+    root = workspace_root.expanduser().resolve()
+    if not root.is_dir():
+        return []
+    names: list[str] = []
+    try:
+        for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+            if entry.is_dir() and not entry.name.startswith(".") and PROJECT_NAME_RE.fullmatch(
+                entry.name
+            ):
+                names.append(entry.name)
+    except OSError as e:
+        log.warning("Could not list projects under %s: %s", root, e)
+    return names
+
+
+def project_workspace(workspace_root: Path, project: str) -> "Workspace":
+    name = validate_project_name(project)
+    root = workspace_root.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    # Reject symlink escape of the project directory itself.
+    project_dir = (root / name).resolve()
+    try:
+        project_dir.relative_to(root)
+    except ValueError as e:
+        raise ValueError("Project path escapes workspace") from e
+    return Workspace(project_dir)
+
+
 class Workspace:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
@@ -138,7 +180,7 @@ def _assert_public_url(url: str) -> None:
 
 
 def build_tools(
-    workspace: Workspace,
+    workspace: Workspace | None,
     *,
     include_workspace: bool,
     include_web: bool,
@@ -153,21 +195,24 @@ def build_tools(
     tools.append(now)
 
     if include_workspace:
+        if workspace is None:
+            raise ValueError("Workspace tools require a project workspace")
+        ws = workspace
 
         def list_dir(path: str = ".") -> str:
-            """List files and directories under a workspace-relative path.
+            """List files and directories under a project-relative path.
 
             Args:
-                path: Path relative to the workspace root (leading "/" is ok; default ".").
+                path: Path relative to the project root (leading "/" is ok; default ".").
             """
             try:
-                target = workspace.resolve(path)
+                target = ws.resolve(path)
             except ValueError as e:
                 return f"Error: {e}"
             if not target.exists():
                 return f"Error: path not found: {path}"
             if not target.is_dir():
-                return f"Error: not a directory: {workspace.relpath(target)}"
+                return f"Error: not a directory: {ws.relpath(target)}"
             entries = sorted(target.iterdir(), key=lambda p: p.name.lower())
             lines: list[str] = []
             for i, entry in enumerate(entries):
@@ -175,17 +220,17 @@ def build_tools(
                     lines.append(f"…and {len(entries) - LIST_DIR_MAX} more")
                     break
                 kind = "dir" if entry.is_dir() else "file"
-                lines.append(f"{kind}\t{workspace.relpath(entry)}")
+                lines.append(f"{kind}\t{ws.relpath(entry)}")
             return truncate("\n".join(lines) if lines else "(empty)")
 
         def read_file(path: str) -> str:
-            """Read a text file from the workspace.
+            """Read a text file from the project.
 
             Args:
-                path: Path relative to the workspace root (leading "/" is ok).
+                path: Path relative to the project root (leading "/" is ok).
             """
             try:
-                target = workspace.resolve(path)
+                target = ws.resolve(path)
             except ValueError as e:
                 return f"Error: {e}"
             if not target.is_file():
@@ -202,16 +247,16 @@ def build_tools(
             return truncate(text)
 
         def write_file(path: str, content: str) -> str:
-            """Write a text file inside the workspace (creates parent dirs).
+            """Write a text file inside the project (creates parent dirs).
 
             Args:
-                path: Path relative to the workspace root (leading "/" is ok).
+                path: Path relative to the project root (leading "/" is ok).
                 content: Text content to write.
             """
             if len(content.encode("utf-8")) > WRITE_FILE_MAX:
                 return f"Error: content larger than {WRITE_FILE_MAX} bytes"
             try:
-                target = workspace.resolve(path)
+                target = ws.resolve(path)
             except ValueError as e:
                 return f"Error: {e}"
             try:
@@ -219,7 +264,7 @@ def build_tools(
                 target.write_text(content, encoding="utf-8")
             except OSError as e:
                 return f"Error: {e}"
-            return f"Wrote {workspace.relpath(target)} ({len(content)} chars)"
+            return f"Wrote {ws.relpath(target)} ({len(content)} chars)"
 
         tools.extend([list_dir, read_file, write_file])
 
@@ -287,7 +332,7 @@ def profile_flags(profile: str) -> tuple[bool, bool]:
 PROFILE_SYSTEM: dict[str, str] = {
     "workspace": (
         "You are OwnRun's workspace agent. Use the provided tools to work with files "
-        "inside the sandboxed workspace. Paths are relative to the workspace root. "
+        "inside the selected project. Paths are relative to the project root. "
         "Prefer tools over guessing file contents. When finished, give a concise final answer."
     ),
     "web": (
@@ -295,8 +340,8 @@ PROFILE_SYSTEM: dict[str, str] = {
         "Do not invent page contents. When finished, give a concise final answer."
     ),
     "workspace_web": (
-        "You are OwnRun's agent with workspace files and public HTTP fetch. "
-        "Use tools for facts. Paths are workspace-relative. When finished, give a concise final answer."
+        "You are OwnRun's agent with project files and public HTTP fetch. "
+        "Use tools for facts. Paths are project-relative. When finished, give a concise final answer."
     ),
 }
 

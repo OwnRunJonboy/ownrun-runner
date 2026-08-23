@@ -34,7 +34,7 @@ Environment variables:
 | `OLLAMA_BASE_URL` | no | `http://127.0.0.1:11434` | Ollama API base |
 | `OWNRUN_JOB_TIMEOUT` | no | `3600` | Per-job Ollama timeout (seconds) |
 | `OWNRUN_UPLOAD_RETRIES` | no | `5` | Retries for complete/fail uploads |
-| `OWNRUN_AGENT_WORKSPACE` | no | `~/ownrun-workspace` | Sandbox root for agent file tools |
+| `OWNRUN_AGENT_WORKSPACE` | no | `~/ownrun-workspace` | Parent directory for agent projects (each job sandboxes to a subdirectory) |
 | `OWNRUN_AGENT_PROFILES` | no | `workspace,web,workspace_web` | Enabled agent profiles |
 | `OWNRUN_AGENT_WALL_CLOCK` | no | `1200` | Max seconds per agent job |
 | `OWNRUN_AGENT_FETCH_TIMEOUT` | no | `15` | HTTP fetch timeout (seconds) |
@@ -49,8 +49,8 @@ python run.py
 
 ## Behavior
 
-- Sends heartbeat every poll interval with Ollama models plus agent profiles / tool-capable models
+- Sends heartbeat every poll interval with Ollama models, agent profiles / tool-capable models, and known project directories
 - Claims one job at a time
 - Sends job heartbeats every 30s while running (response may request cancel)
 - Supports `ollama.chat` and `agent.task` jobs
-- Agent jobs use Autogen AgentChat + sandboxed tools; progress traces upload while running
+- Agent jobs use Autogen AgentChat + tools sandboxed to a selected **project** under `OWNRUN_AGENT_WORKSPACE`; progress traces upload while running

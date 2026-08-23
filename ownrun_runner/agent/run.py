@@ -8,9 +8,9 @@ from typing import Any, Callable
 
 from ownrun_runner.agent.tools import (
     TOOL_RESULT_MAX,
-    Workspace,
     build_tools,
     profile_flags,
+    project_workspace,
     serialize_args,
     system_message_for,
     truncate,
@@ -198,12 +198,31 @@ async def _run_agent_async(
     max_iter = int(request.get("max_tool_iterations") or 8)
     max_iter = max(1, min(max_iter, 20))
 
+    project_raw = request.get("project")
+    project: str | None = None
+    if include_ws:
+        if not project_raw or not str(project_raw).strip():
+            raise ValueError(
+                "Agent jobs with file tools require a project "
+                "(subdirectory under OWNRUN_AGENT_WORKSPACE)"
+            )
+        project = str(project_raw).strip()
+    elif project_raw and str(project_raw).strip():
+        # Optional on web-only profiles; still validate if provided.
+        project = str(project_raw).strip()
+
     system_extra = request.get("system_prompt")
     system_message = system_message_for(
         profile, str(system_extra) if system_extra else None
     )
 
-    workspace = Workspace(Path(config.agent_workspace))
+    if include_ws:
+        assert project is not None
+        workspace = project_workspace(Path(config.agent_workspace), project)
+        log.info("Agent project sandbox: %s", workspace.root)
+    else:
+        workspace = None
+
     tools = build_tools(
         workspace,
         include_workspace=include_ws,
@@ -281,6 +300,8 @@ async def _run_agent_async(
                         "iterations": iterations,
                         "trace": list(trace),
                     }
+                    if project:
+                        partial["project"] = project
                     try:
                         on_progress(partial)
                     except Exception as e:
@@ -313,7 +334,7 @@ async def _run_agent_async(
     if not text:
         text = "(no final answer)"
 
-    return {
+    result: dict[str, Any] = {
         "text": text,
         "model": str(model),
         "profile": profile,
@@ -322,6 +343,9 @@ async def _run_agent_async(
         "iterations": iterations,
         "trace": trace,
     }
+    if project:
+        result["project"] = project
+    return result
 
 
 def run_agent_task(
