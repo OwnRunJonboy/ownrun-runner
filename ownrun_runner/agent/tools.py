@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import re
 import socket
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
+
+from ownrun_runner.client import ServerClient
 
 log = logging.getLogger(__name__)
 
@@ -179,20 +183,196 @@ def _assert_public_url(url: str) -> None:
             raise ValueError(f"Refusing non-public address {ip_str}")
 
 
+def _to_utc_z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def clock_payload(timezone_name: str, when: datetime | None = None) -> dict[str, Any]:
+    """UTC + local clock, plus ready-made calendar_search windows."""
+    tz = ZoneInfo(timezone_name)
+    utc = (when or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+    local = utc.astimezone(tz)
+    local_midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    days_since_sunday = (local.weekday() + 1) % 7
+    week_start = local_midnight - timedelta(days=days_since_sunday)
+    week_end = week_start + timedelta(days=7)
+    today_end = local_midnight + timedelta(days=1)
+    next_7_end = local_midnight + timedelta(days=7)
+    return {
+        "utc": _to_utc_z(utc),
+        "timezone": timezone_name,
+        "local": local.isoformat(timespec="seconds"),
+        "weekday": local.strftime("%A"),
+        "today": {"start": _to_utc_z(local_midnight), "end": _to_utc_z(today_end)},
+        "this_week": {"start": _to_utc_z(week_start), "end": _to_utc_z(week_end)},
+        "next_7_days": {"start": _to_utc_z(local_midnight), "end": _to_utc_z(next_7_end)},
+    }
+
+
+def _dump(data: Any) -> str:
+    return truncate(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+
+
+def _calendar_error(exc: Exception) -> str:
+    import requests
+
+    if isinstance(exc, requests.HTTPError):
+        return f"Error: {exc}"
+    return f"Error: {exc}"
+
+
 def build_tools(
     workspace: Workspace | None,
     *,
     include_workspace: bool,
     include_web: bool,
     fetch_timeout: float,
+    timezone_name: str = "America/New_York",
+    calendar_client: ServerClient | None = None,
+    job_id: int | None = None,
 ) -> list[Callable[..., str]]:
     tools: list[Callable[..., str]] = []
 
     def now() -> str:
-        """Return the current UTC date and time in ISO-8601 format."""
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        """Current date/time, plus UTC windows for calendar_search.
+
+        No arguments. Copy this_week.start/end (or today / next_7_days) into
+        calendar_search. Do not invent other calendar tools.
+        """
+        return json.dumps(clock_payload(timezone_name), ensure_ascii=False)
 
     tools.append(now)
+
+    if calendar_client is not None and job_id is not None:
+        client = calendar_client
+        jid = job_id
+
+        def calendar_search(start: str = "", end: str = "", query: str = "") -> str:
+            """List calendar entries between two UTC times.
+
+            For 'this week', copy start/end from the system prompt or from now().this_week.
+            If start and end are omitted, this week is used. Other ranges (including past years)
+            are searched as given.
+            """
+            try:
+                start_s = (start or "").strip()
+                end_s = (end or "").strip()
+                if not start_s or not end_s:
+                    windows = clock_payload(timezone_name)
+                    start_s = start_s or windows["this_week"]["start"]
+                    end_s = end_s or windows["this_week"]["end"]
+                data = client.calendar_search(jid, start_s, end_s, query.strip() or None)
+                log.info("calendar_search job=%s", jid)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def calendar_get(id: int) -> str:
+            """Get one calendar entry by id, including description.
+
+            Args:
+                id: Calendar entry id from calendar_search.
+            """
+            try:
+                entry_id = int(id)
+                data = client.calendar_get(jid, entry_id)
+                log.info("calendar_get job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def calendar_add(
+            title: str,
+            starts_at: str,
+            ends_at: str = "",
+            all_day: bool = False,
+            description: str = "",
+        ) -> str:
+            """Create a calendar entry. Project is set from this job automatically.
+
+            Args:
+                title: Short title (max 200 chars).
+                starts_at: Start instant, UTC ISO-8601.
+                ends_at: Optional end instant, UTC ISO-8601.
+                all_day: True for a civil-date event (use local midnight converted to UTC).
+                description: Optional notes.
+            """
+            try:
+                body: dict[str, Any] = {
+                    "title": title,
+                    "starts_at": starts_at,
+                    "all_day": bool(all_day),
+                }
+                if ends_at and ends_at.strip():
+                    body["ends_at"] = ends_at.strip()
+                if description and description.strip():
+                    body["description"] = description
+                data = client.calendar_add(jid, body)
+                entry_id = data.get("id")
+                log.info("calendar_add job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def calendar_edit(
+            id: int,
+            title: str = "",
+            starts_at: str = "",
+            ends_at: str = "",
+            all_day: str = "",
+            description: str = "",
+        ) -> str:
+            """Edit a calendar entry in this job's project write set. Omit unchanged fields.
+
+            Args:
+                id: Calendar entry id.
+                title: New title, or empty to leave unchanged.
+                starts_at: New start UTC ISO-8601, or empty to leave unchanged.
+                ends_at: New end UTC ISO-8601, empty to leave unchanged, or "null" to clear.
+                all_day: "true"/"false", or empty to leave unchanged.
+                description: New description, or empty to leave unchanged.
+            """
+            try:
+                entry_id = int(id)
+                body: dict[str, Any] = {}
+                if title and title.strip():
+                    body["title"] = title.strip()
+                if starts_at and str(starts_at).strip():
+                    body["starts_at"] = str(starts_at).strip()
+                end_raw = str(ends_at or "").strip()
+                if end_raw.lower() == "null":
+                    body["ends_at"] = None
+                elif end_raw:
+                    body["ends_at"] = end_raw
+                if str(all_day).strip() != "":
+                    body["all_day"] = str(all_day).strip().lower() in {"1", "true", "yes", "on"}
+                if description:
+                    body["description"] = description
+                if not body:
+                    return "Error: no fields to update"
+                data = client.calendar_edit(jid, entry_id, body)
+                log.info("calendar_edit job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def calendar_delete(id: int) -> str:
+            """Delete a calendar entry in this job's project write set.
+
+            Args:
+                id: Calendar entry id.
+            """
+            try:
+                entry_id = int(id)
+                data = client.calendar_delete(jid, entry_id)
+                log.info("calendar_delete job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        tools.extend(
+            [calendar_search, calendar_get, calendar_add, calendar_edit, calendar_delete]
+        )
 
     if include_workspace:
         if workspace is None:
@@ -346,11 +526,36 @@ PROFILE_SYSTEM: dict[str, str] = {
 }
 
 
-def system_message_for(profile: str, extra: str | None) -> str:
+def system_message_for(
+    profile: str,
+    extra: str | None,
+    *,
+    timezone: str = "America/New_York",
+    project: str | None = None,
+) -> str:
     base = PROFILE_SYSTEM.get(profile, PROFILE_SYSTEM["workspace"])
+    clock = clock_payload(timezone)
+    local_date = str(clock["local"])[:10]
+    year = local_date[:4]
+    project_label = project if project else "none"
+    calendar = (
+        f"Today is {clock['weekday']}, {local_date} ({timezone}). "
+        f"The current year is {year}. Use that date for 'today' / 'this week'; "
+        "if the user names another year, search that year.\n"
+        "Calendar tools (do not invent names; there is no project_calendar): "
+        "now, calendar_search, calendar_get, calendar_add, calendar_edit, calendar_delete.\n"
+        "For 'what's on the calendar this week', call calendar_search with these exact UTC values "
+        f"(or omit start/end): start={clock['this_week']['start']} "
+        f"end={clock['this_week']['end']}. "
+        "You may call now() if you need another window (today / next_7_days).\n"
+        f"This job's project is {project_label}; adds are stamped with that project. "
+        "You can read unscoped events; you can only add/edit/delete this job's project "
+        "(or unscoped events if this job has no project)."
+    )
+    parts = [base, calendar]
     if extra and extra.strip():
-        return f"{base}\n\nAdditional instructions:\n{extra.strip()}"
-    return base
+        parts.append(f"Additional instructions:\n{extra.strip()}")
+    return "\n\n".join(parts)
 
 
 def serialize_args(args: Any) -> dict[str, Any]:

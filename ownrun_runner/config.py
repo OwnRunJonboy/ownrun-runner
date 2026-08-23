@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def _default_workspace() -> str:
@@ -21,6 +22,7 @@ class Config:
     agent_profiles: tuple[str, ...]
     agent_wall_clock: float
     agent_fetch_timeout: float
+    timezone: str
 
     @classmethod
     def from_env(cls) -> Config:
@@ -38,6 +40,16 @@ class Config:
             p.strip() for p in profiles_raw.split(",") if p.strip()
         ) or ("workspace",)
 
+        timezone = (os.environ.get("OWNRUN_TIMEZONE") or "America/New_York").strip()
+        if not timezone:
+            timezone = "America/New_York"
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, Exception) as e:
+            raise SystemExit(
+                f"Invalid OWNRUN_TIMEZONE {timezone!r}: {e}"
+            ) from e
+
         return cls(
             server_url=server_url,
             runner_token=token,
@@ -51,6 +63,7 @@ class Config:
             agent_profiles=profiles,
             agent_wall_clock=float(os.environ.get("OWNRUN_AGENT_WALL_CLOCK", "1200")),
             agent_fetch_timeout=float(os.environ.get("OWNRUN_AGENT_FETCH_TIMEOUT", "15")),
+            timezone=timezone,
         )
 
     @property

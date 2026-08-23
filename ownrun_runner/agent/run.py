@@ -179,6 +179,8 @@ async def _run_agent_async(
     config: Config,
     request: dict[str, Any],
     *,
+    job_id: int,
+    calendar_client: Any | None,
     on_progress: Callable[[dict[str, Any]], None] | None,
     should_cancel: Callable[[], bool] | None,
 ) -> dict[str, Any]:
@@ -213,7 +215,10 @@ async def _run_agent_async(
 
     system_extra = request.get("system_prompt")
     system_message = system_message_for(
-        profile, str(system_extra) if system_extra else None
+        profile,
+        str(system_extra) if system_extra else None,
+        timezone=config.timezone,
+        project=project,
     )
 
     if include_ws:
@@ -228,6 +233,9 @@ async def _run_agent_async(
         include_workspace=include_ws,
         include_web=include_web,
         fetch_timeout=config.agent_fetch_timeout,
+        timezone_name=config.timezone,
+        calendar_client=calendar_client,
+        job_id=job_id,
     )
 
     model_info = _model_info_for(str(model))
@@ -352,6 +360,8 @@ def run_agent_task(
     config: Config,
     request: dict[str, Any],
     *,
+    job_id: int,
+    calendar_client: Any | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -359,6 +369,8 @@ def run_agent_task(
         _run_agent_async(
             config,
             request,
+            job_id=job_id,
+            calendar_client=calendar_client,
             on_progress=on_progress,
             should_cancel=should_cancel,
         )

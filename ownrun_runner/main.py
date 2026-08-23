@@ -35,6 +35,7 @@ def _heartbeat_loop(client: ServerClient, config: Config) -> None:
                 agent_profiles=list(config.agent_profiles),
                 agent_models=agent_models,
                 agent_projects=projects,
+                timezone=config.timezone,
             )
             log.debug(
                 "Heartbeat sent (%d models, %d agent-capable, %d projects, profiles=%s)",
@@ -91,6 +92,8 @@ def _process_job(client: ServerClient, config: Config, job: dict[str, Any]) -> N
                 result = run_agent_task(
                     config,
                     request,
+                    job_id=job_id,
+                    calendar_client=client,
                     on_progress=on_progress,
                     should_cancel=cancel_flag.is_set,
                 )
@@ -137,11 +140,12 @@ def run(config: Config) -> None:
 
     client = ServerClient(config)
     log.info(
-        "OwnRun runner started — server=%s poll=%ss workspace=%s profiles=%s",
+        "OwnRun runner started — server=%s poll=%ss workspace=%s profiles=%s timezone=%s",
         config.server_url,
         config.poll_interval,
         config.agent_workspace,
         ",".join(config.agent_profiles),
+        config.timezone,
     )
 
     hb_thread = threading.Thread(target=_heartbeat_loop, args=(client, config), daemon=True)
