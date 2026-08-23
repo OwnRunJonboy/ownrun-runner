@@ -23,17 +23,42 @@ def list_models(config: Config) -> list[str]:
         return []
 
 
-def run_ollama_chat(config: Config, request: dict[str, Any]) -> dict[str, Any]:
-    model = request.get("model")
-    prompt = request.get("prompt")
-    if not model or not prompt:
-        raise ValueError("Job request missing model or prompt")
+_ALLOWED_ROLES = {"system", "user", "assistant"}
 
-    messages: list[dict[str, str]] = []
+
+def messages_from_request(request: dict[str, Any]) -> list[dict[str, str]]:
+    raw = request.get("messages")
+    if isinstance(raw, list) and raw:
+        messages: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", ""))
+            content = item.get("content")
+            if role not in _ALLOWED_ROLES or content is None:
+                continue
+            messages.append({"role": role, "content": str(content)})
+        if messages:
+            return messages
+
+    messages = []
     system = request.get("system_prompt")
     if system:
         messages.append({"role": "system", "content": str(system)})
-    messages.append({"role": "user", "content": str(prompt)})
+    prompt = request.get("prompt")
+    if prompt:
+        messages.append({"role": "user", "content": str(prompt)})
+    return messages
+
+
+def run_ollama_chat(config: Config, request: dict[str, Any]) -> dict[str, Any]:
+    model = request.get("model")
+    if not model:
+        raise ValueError("Job request missing model")
+
+    messages = messages_from_request(request)
+    if not any(m["role"] == "user" for m in messages):
+        raise ValueError("Job request missing prompt or messages")
 
     body = {
         "model": str(model),
