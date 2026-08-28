@@ -188,6 +188,54 @@ class ServerClient:
             retries=1,
         ) or {}
 
+    def journal_search(
+        self,
+        job_id: int,
+        start: str,
+        end: str,
+        query: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"from": start, "to": end}
+        if query:
+            params["q"] = query
+        return self._request(
+            "GET",
+            f"/runner/jobs/{job_id}/journal",
+            params=params,
+            retries=1,
+        ) or {}
+
+    def journal_get(self, job_id: int, entry_id: int) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/runner/jobs/{job_id}/journal/{entry_id}",
+            retries=1,
+        ) or {}
+
+    def journal_add(self, job_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/runner/jobs/{job_id}/journal",
+            json=body,
+            retries=1,
+        ) or {}
+
+    def journal_edit(self, job_id: int, entry_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/runner/jobs/{job_id}/journal/{entry_id}",
+            json=body,
+            retries=1,
+        ) or {}
+
+    def journal_delete(self, job_id: int, entry_id: int) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/runner/jobs/{job_id}/journal/{entry_id}/delete",
+            json={},
+            retries=1,
+        ) or {}
+
     def _with_upload_retries(self, fn: Any) -> None:
         last_error: Exception | None = None
         for attempt in range(self.config.upload_retries):

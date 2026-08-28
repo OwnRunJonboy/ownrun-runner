@@ -374,6 +374,115 @@ def build_tools(
             [calendar_search, calendar_get, calendar_add, calendar_edit, calendar_delete]
         )
 
+        def journal_search(start: str = "", end: str = "", query: str = "") -> str:
+            """List journal entries between two civil dates (YYYY-MM-DD).
+
+            For 'this month' or 'recent', derive dates from now().local (first 10 chars are YYYY-MM-DD).
+            start and end are required ISO dates. Optional query filters title/body.
+            """
+            try:
+                start_s = (start or "").strip()
+                end_s = (end or "").strip()
+                if not start_s or not end_s:
+                    local_date = str(clock_payload(timezone_name)["local"])[:10]
+                    start_s = start_s or local_date
+                    end_s = end_s or local_date
+                # Accept full ISO timestamps by taking the date prefix.
+                start_s = start_s[:10]
+                end_s = end_s[:10]
+                data = client.journal_search(jid, start_s, end_s, query.strip() or None)
+                log.info("journal_search job=%s", jid)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def journal_get(id: int) -> str:
+            """Get one journal entry by id, including full body.
+
+            Args:
+                id: Journal entry id from journal_search.
+            """
+            try:
+                entry_id = int(id)
+                data = client.journal_get(jid, entry_id)
+                log.info("journal_get job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def journal_add(body: str, title: str = "", entry_date: str = "") -> str:
+            """Create a journal entry for this job's project. Fails if the job has no project.
+
+            Args:
+                body: Required journal text.
+                title: Optional short title.
+                entry_date: Optional civil date YYYY-MM-DD (defaults to today).
+            """
+            try:
+                payload: dict[str, Any] = {"body": body}
+                if title and title.strip():
+                    payload["title"] = title.strip()
+                if entry_date and str(entry_date).strip():
+                    payload["entry_date"] = str(entry_date).strip()[:10]
+                data = client.journal_add(jid, payload)
+                entry_id = data.get("id")
+                log.info("journal_add job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def journal_edit(
+            id: int,
+            body: str = "",
+            title: str = "",
+            entry_date: str = "",
+        ) -> str:
+            """Edit a journal entry in this job's project. Omit unchanged fields.
+
+            Args:
+                id: Journal entry id.
+                body: New body, or empty to leave unchanged.
+                title: New title, empty to leave unchanged, or "null" to clear.
+                entry_date: New civil date YYYY-MM-DD, or empty to leave unchanged.
+            """
+            try:
+                entry_id = int(id)
+                payload: dict[str, Any] = {}
+                if body:
+                    payload["body"] = body
+                title_raw = str(title or "").strip()
+                if title_raw.lower() == "null":
+                    payload["title"] = None
+                elif title_raw:
+                    payload["title"] = title_raw
+                if entry_date and str(entry_date).strip():
+                    payload["entry_date"] = str(entry_date).strip()[:10]
+                if not payload:
+                    return "Error: no fields to update"
+                data = client.journal_edit(jid, entry_id, payload)
+                log.info("journal_edit job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def journal_delete(id: int) -> str:
+            """Soft-delete a journal entry in this job's project write set.
+
+            Args:
+                id: Journal entry id.
+            """
+            try:
+                entry_id = int(id)
+                data = client.journal_delete(jid, entry_id)
+                log.info("journal_delete job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        tools.extend(
+            [journal_search, journal_get, journal_add, journal_edit, journal_delete]
+        )
+
     if include_workspace:
         if workspace is None:
             raise ValueError("Workspace tools require a project workspace")
@@ -537,7 +646,7 @@ def system_message_for(
     clock = clock_payload(timezone)
     local_date = str(clock["local"])[:10]
     year = local_date[:4]
-    project_label = project if project else "none"
+    project_label = project if project else "none (journal writes disabled)"
     calendar = (
         f"Today is {clock['weekday']}, {local_date} ({timezone}). "
         f"The current year is {year}. Use that date for 'today' / 'this week'; "
@@ -548,11 +657,24 @@ def system_message_for(
         f"(or omit start/end): start={clock['this_week']['start']} "
         f"end={clock['this_week']['end']}. "
         "You may call now() if you need another window (today / next_7_days).\n"
-        f"This job's project is {project_label}; adds are stamped with that project. "
+        f"This job's project is {project_label}; calendar adds are stamped with that project "
+        "(or unscoped if none). "
         "You can read unscoped events; you can only add/edit/delete this job's project "
         "(or unscoped events if this job has no project)."
     )
-    parts = [base, calendar]
+    journal = (
+        "Journal tools (do not invent names): "
+        "now, journal_search, journal_get, journal_add, journal_edit, journal_delete.\n"
+        f"Today's civil date is {local_date}. Use YYYY-MM-DD for journal_search start/end "
+        "and for journal_add entry_date.\n"
+        f"This job's project is {project_label}. "
+        "You can read global (unscoped) journal entries for context. "
+        "You can only add, edit, or soft-delete entries for this job's project; "
+        "journal_add fails if this job has no project. "
+        "Prefer journal_add at the end of a long task to record decisions; "
+        "use journal_search before repeating prior work."
+    )
+    parts = [base, calendar, journal]
     if extra and extra.strip():
         parts.append(f"Additional instructions:\n{extra.strip()}")
     return "\n\n".join(parts)
