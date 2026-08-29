@@ -236,6 +236,65 @@ class ServerClient:
             retries=1,
         ) or {}
 
+    def task_search(
+        self,
+        job_id: int,
+        *,
+        status: str | None = None,
+        priority: str | None = None,
+        query: str | None = None,
+        due_from: str | None = None,
+        due_to: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if status:
+            params["status"] = status
+        if priority:
+            params["priority"] = priority
+        if query:
+            params["q"] = query
+        if due_from:
+            params["due_from"] = due_from
+        if due_to:
+            params["due_to"] = due_to
+        return self._request(
+            "GET",
+            f"/runner/jobs/{job_id}/tasks",
+            params=params or None,
+            retries=1,
+        ) or {}
+
+    def task_get(self, job_id: int, entry_id: int) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/runner/jobs/{job_id}/tasks/{entry_id}",
+            retries=1,
+        ) or {}
+
+    def task_add(self, job_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/runner/jobs/{job_id}/tasks",
+            json=body,
+            retries=1,
+        ) or {}
+
+    def task_edit(self, job_id: int, entry_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/runner/jobs/{job_id}/tasks/{entry_id}",
+            json=body,
+            retries=1,
+        ) or {}
+
+    def task_delete(self, job_id: int, entry_id: int) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/runner/jobs/{job_id}/tasks/{entry_id}/delete",
+            json={},
+            retries=1,
+        ) or {}
+
     def _with_upload_retries(self, fn: Any) -> None:
         last_error: Exception | None = None
         for attempt in range(self.config.upload_retries):

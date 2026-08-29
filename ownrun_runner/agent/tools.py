@@ -483,6 +483,144 @@ def build_tools(
             [journal_search, journal_get, journal_add, journal_edit, journal_delete]
         )
 
+        def task_search(
+            status: str = "",
+            priority: str = "",
+            query: str = "",
+            due_start: str = "",
+            due_end: str = "",
+        ) -> str:
+            """List open tasks this job can see (global + this project).
+
+            Omit args for the working set (todo and in_progress). Due dates are
+            civil YYYY-MM-DD. Pass finished as status to look at completed work.
+            """
+            try:
+                due_from = (due_start or "").strip()[:10] or None
+                due_to = (due_end or "").strip()[:10] or None
+                if (due_from and not due_to) or (due_to and not due_from):
+                    return "Error: due_start and due_end are both required when filtering by due date"
+                data = client.task_search(
+                    jid,
+                    status=(status or "").strip() or None,
+                    priority=(priority or "").strip() or None,
+                    query=query.strip() or None,
+                    due_from=due_from,
+                    due_to=due_to,
+                )
+                log.info("task_search job=%s", jid)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def task_get(id: int) -> str:
+            """Get one task by id, including full description.
+
+            Args:
+                id: Task id from task_search.
+            """
+            try:
+                entry_id = int(id)
+                data = client.task_get(jid, entry_id)
+                log.info("task_get job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def task_add(
+            name: str,
+            description: str = "",
+            due_date: str = "",
+            priority: str = "",
+            status: str = "",
+        ) -> str:
+            """Create a task for this job's project. Fails if the job has no project.
+
+            Args:
+                name: Required short name.
+                description: Optional notes.
+                due_date: Optional civil date YYYY-MM-DD.
+                priority: high, normal, or low (default normal).
+                status: todo, in_progress, or finished (default todo).
+            """
+            try:
+                payload: dict[str, Any] = {"name": name}
+                if description and description.strip():
+                    payload["description"] = description
+                if due_date and str(due_date).strip():
+                    payload["due_date"] = str(due_date).strip()[:10]
+                if priority and priority.strip():
+                    payload["priority"] = priority.strip()
+                if status and status.strip():
+                    payload["status"] = status.strip()
+                data = client.task_add(jid, payload)
+                entry_id = data.get("id")
+                log.info("task_add job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def task_edit(
+            id: int,
+            name: str = "",
+            description: str = "",
+            due_date: str = "",
+            priority: str = "",
+            status: str = "",
+        ) -> str:
+            """Edit a task in this job's project. Omit unchanged fields.
+
+            Args:
+                id: Task id.
+                name: New name, or empty to leave unchanged.
+                description: New description, empty to leave unchanged, or "null" to clear.
+                due_date: New civil date YYYY-MM-DD, empty to leave unchanged, or "null" to clear.
+                priority: high/normal/low, or empty to leave unchanged.
+                status: todo, in_progress, or finished. Use task_delete to delete.
+            """
+            try:
+                entry_id = int(id)
+                payload: dict[str, Any] = {}
+                if name and name.strip():
+                    payload["name"] = name.strip()
+                desc_raw = str(description or "").strip()
+                if desc_raw.lower() == "null":
+                    payload["description"] = None
+                elif desc_raw:
+                    payload["description"] = description
+                due_raw = str(due_date or "").strip()
+                if due_raw.lower() == "null":
+                    payload["due_date"] = None
+                elif due_raw:
+                    payload["due_date"] = due_raw[:10]
+                if priority and priority.strip():
+                    payload["priority"] = priority.strip()
+                if status and status.strip():
+                    payload["status"] = status.strip()
+                if not payload:
+                    return "Error: no fields to update"
+                data = client.task_edit(jid, entry_id, payload)
+                log.info("task_edit job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        def task_delete(id: int) -> str:
+            """Mark a task deleted in this job's project write set.
+
+            Args:
+                id: Task id.
+            """
+            try:
+                entry_id = int(id)
+                data = client.task_delete(jid, entry_id)
+                log.info("task_delete job=%s id=%s", jid, entry_id)
+                return _dump(data)
+            except Exception as e:
+                return _calendar_error(e)
+
+        tools.extend([task_search, task_get, task_add, task_edit, task_delete])
+
     if include_workspace:
         if workspace is None:
             raise ValueError("Workspace tools require a project workspace")
@@ -622,15 +760,15 @@ PROFILE_SYSTEM: dict[str, str] = {
     "workspace": (
         "You are OwnRun's workspace agent. Use the provided tools to work with files "
         "inside the selected project. Paths are relative to the project root. "
-        "Prefer tools over guessing file contents. When finished, give a concise final answer."
+        "Prefer tools over guessing file contents."
     ),
     "web": (
         "You are OwnRun's web agent. Use http_fetch for public http(s) URLs only. "
-        "Do not invent page contents. When finished, give a concise final answer."
+        "Do not invent page contents."
     ),
     "workspace_web": (
         "You are OwnRun's agent with project files and public HTTP fetch. "
-        "Use tools for facts. Paths are project-relative. When finished, give a concise final answer."
+        "Use tools for facts. Paths are project-relative."
     ),
 }
 
@@ -646,7 +784,7 @@ def system_message_for(
     clock = clock_payload(timezone)
     local_date = str(clock["local"])[:10]
     year = local_date[:4]
-    project_label = project if project else "none (journal writes disabled)"
+    project_label = project if project else "none (journal and task writes disabled)"
     calendar = (
         f"Today is {clock['weekday']}, {local_date} ({timezone}). "
         f"The current year is {year}. Use that date for 'today' / 'this week'; "
@@ -674,7 +812,20 @@ def system_message_for(
         "Prefer journal_add at the end of a long task to record decisions; "
         "use journal_search before repeating prior work."
     )
-    parts = [base, calendar, journal]
+    tasks = (
+        "Task tools (do not invent names): "
+        "now, task_search, task_get, task_add, task_edit, task_delete.\n"
+        f"Today's civil date is {local_date}. Use YYYY-MM-DD for due_date and "
+        "task_search due_start/due_end. Omit due_date when there is no deadline.\n"
+        f"This job's project is {project_label}. "
+        "You can read global (unscoped) tasks for context. "
+        "You can only add, edit, finish, or delete tasks for this job's project; "
+        "task_add fails if this job has no project. "
+        "Prefer task_search (no args) before adding a duplicate; "
+        "use task_edit with status=finished when the work is done; "
+        "use task_add for follow-ups this project should not forget."
+    )
+    parts = [base, calendar, journal, tasks]
     if extra and extra.strip():
         parts.append(f"Additional instructions:\n{extra.strip()}")
     return "\n\n".join(parts)
