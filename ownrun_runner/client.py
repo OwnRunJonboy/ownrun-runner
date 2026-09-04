@@ -92,6 +92,8 @@ class ServerClient:
         agent_models: list[str] | None = None,
         agent_projects: list[str] | None = None,
         timezone: str | None = None,
+        ollama_web_search: bool | None = None,
+        agent_tool_ids: list[str] | None = None,
     ) -> None:
         body: dict[str, Any] = {}
         if models is not None:
@@ -104,7 +106,18 @@ class ServerClient:
             body["agent_projects"] = agent_projects
         if timezone is not None:
             body["timezone"] = timezone
+        if ollama_web_search is not None:
+            body["ollama_web_search"] = ollama_web_search
+        if agent_tool_ids is not None:
+            body["agent_tool_ids"] = agent_tool_ids
         self._request("POST", "/runner/heartbeat", json=body)
+
+    def tool_policy(self, job_id: int) -> list[str]:
+        data = self._request("GET", f"/runner/jobs/{job_id}/tool-policy", retries=1) or {}
+        raw = data.get("disabled_tools") or []
+        if not isinstance(raw, list):
+            return []
+        return [str(x) for x in raw if str(x).strip()]
 
     def claim(self) -> dict[str, Any] | None:
         data = self._request("POST", "/runner/jobs/claim", json={})

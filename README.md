@@ -32,12 +32,17 @@ Environment variables:
 | `OWNRUN_RUNNER_TOKEN` | yes | — | Token from `scripts/setup.php` |
 | `OWNRUN_POLL_INTERVAL` | no | `10` | Seconds between poll cycles |
 | `OLLAMA_BASE_URL` | no | `http://127.0.0.1:11434` | Ollama API base |
+| `OWNRUN_OLLAMA_THINK` | no | `0` | Set to `1` to allow Qwen3.x “thinking” tokens during agent tool calls (can cause truncated tool JSON and HTTP 500) |
+| `OWNRUN_OLLAMA_NUM_PREDICT` | no | `-1` | Ollama `num_predict` for agent jobs (`-1` = no cap) |
+| `OWNRUN_OLLAMA_NUM_CTX` | no | `32768` | Ollama `num_ctx` for agent jobs. `0` = model default. Raise this if tool follow-ups 500 with “No user query found in messages” (Qwen templates after context truncation) |
 | `OWNRUN_JOB_TIMEOUT` | no | `3600` | Per-job Ollama timeout (seconds) |
 | `OWNRUN_UPLOAD_RETRIES` | no | `5` | Retries for complete/fail uploads |
 | `OWNRUN_AGENT_WORKSPACE` | no | `~/ownrun-workspace` | Parent directory for agent projects (each job sandboxes to a subdirectory) |
 | `OWNRUN_AGENT_PROFILES` | no | `workspace,web,workspace_web` | Enabled agent profiles |
 | `OWNRUN_AGENT_WALL_CLOCK` | no | `1200` | Max seconds per agent job |
-| `OWNRUN_AGENT_FETCH_TIMEOUT` | no | `15` | HTTP fetch timeout (seconds) |
+| `OWNRUN_AGENT_FETCH_TIMEOUT` | no | `15` | HTTP fetch and web search timeout (seconds) |
+| `OLLAMA_API_KEY` | no | — | Bearer token for Ollama cloud web search (`https://ollama.com/api/web_search`) |
+| `OWNRUN_AGENT_WEB_SEARCH` | no | `1` | Set to `0` to disable `web_search` globally on this runner |
 
 ## Run
 

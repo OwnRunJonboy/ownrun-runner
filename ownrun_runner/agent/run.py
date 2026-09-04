@@ -4,11 +4,12 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from ownrun_runner.agent.tools import (
     TOOL_RESULT_MAX,
     build_tools,
+    compute_effective_tools,
     profile_flags,
     project_workspace,
     serialize_args,
@@ -149,6 +150,85 @@ def _final_text_from_trace(trace: list[dict[str, Any]], task_result: Any) -> str
     return ""
 
 
+def _plain_user_content(msg: Any) -> str | None:
+    """Return user-turn text that Qwen templates count as a real query, or None."""
+    role = getattr(msg, "role", None)
+    if role != "user":
+        return None
+    text = str(getattr(msg, "content", None) or "").strip()
+    if not text:
+        return None
+    if text.startswith("<tool_response>") and text.endswith("</tool_response>"):
+        return None
+    return text
+
+
+def _has_plain_user_query(messages: Sequence[Any]) -> bool:
+    return any(_plain_user_content(m) is not None for m in messages)
+
+
+def _ensure_user_query(messages: Sequence[Any], fallback: str) -> list[Any]:
+    """Keep a plain user turn in the Ollama payload.
+
+    Qwen3.5/3.8 Jinja templates 500 if no non-``<tool_response>`` user turn
+    remains. That happens when Autogen omits the user message, or when Ollama
+    truncates it to fit ``num_ctx`` after a large tool result.
+    """
+    msgs = list(messages)
+    has_query = _has_plain_user_query(msgs)
+    last_role = getattr(msgs[-1], "role", None) if msgs else None
+    last_is_tool = last_role == "tool" or (
+        bool(msgs) and last_role == "user" and _plain_user_content(msgs[-1]) is None
+    )
+
+    if has_query and not last_is_tool:
+        return msgs
+
+    from ollama import Message
+
+    if not has_query:
+        text = (fallback or "").strip() or "Please continue the task."
+        log.warning(
+            "Ollama chat payload had no user query; inserting fallback for Qwen templates"
+        )
+        msgs.append(Message(role="user", content=text))
+        return msgs
+
+    # Tool follow-up: a trailing user turn survives truncation of the original.
+    msgs.append(Message(role="user", content="Continue from the tool results above."))
+    return msgs
+
+
+def _fallback_user_query(request: dict[str, Any], task: str | list[Any]) -> str:
+    prompt = str(request.get("prompt") or "").strip()
+    if prompt:
+        return prompt
+    if isinstance(task, str) and task.strip():
+        return task.strip()
+    if isinstance(task, list):
+        for item in reversed(task):
+            content = str(getattr(item, "content", "") or "").strip()
+            source = getattr(item, "source", "")
+            if source == "user" and content:
+                return content
+    return "Please continue the task."
+
+
+def _ownrun_ollama_client(fallback_user_query: str, **kwargs: Any) -> Any:
+    from autogen_ext.models.ollama import OllamaChatCompletionClient
+
+    class OwnRunOllamaClient(OllamaChatCompletionClient):
+        def __init__(self, **inner: Any) -> None:
+            super().__init__(**inner)
+
+        def _process_create_args(self, *args: Any, **kw: Any) -> Any:  # type: ignore[override]
+            params = super()._process_create_args(*args, **kw)
+            params.messages = _ensure_user_query(params.messages, fallback_user_query)
+            return params
+
+    return OwnRunOllamaClient(**kwargs)
+
+
 def _task_from_request(request: dict[str, Any]) -> str | list[Any]:
     from autogen_agentchat.messages import TextMessage
 
@@ -187,7 +267,6 @@ async def _run_agent_async(
     from autogen_agentchat.agents import AssistantAgent
     from autogen_agentchat.base import TaskResult
     from autogen_core import CancellationToken
-    from autogen_ext.models.ollama import OllamaChatCompletionClient
 
     model = request.get("model")
     if not model:
@@ -213,12 +292,38 @@ async def _run_agent_async(
         # Optional on web-only profiles; still validate if provided.
         project = str(project_raw).strip()
 
+    project_disabled: list[str] = []
+    if calendar_client is not None:
+        try:
+            project_disabled = calendar_client.tool_policy(job_id)
+        except Exception as e:
+            log.warning("Job #%s tool policy fetch failed: %s", job_id, e)
+
+    job_disabled_raw = request.get("disabled_tools")
+    job_disabled: list[str] = []
+    if isinstance(job_disabled_raw, list):
+        job_disabled = [str(x) for x in job_disabled_raw if str(x).strip()]
+
+    effective = compute_effective_tools(
+        profile,
+        agent_web_search=config.agent_web_search,
+        project_disabled=project_disabled,
+        job_disabled=job_disabled,
+    )
+
+    if "web_search" in effective and not config.ollama_api_key:
+        raise ValueError(
+            "OLLAMA_API_KEY is required for web search on this job. "
+            "Set OLLAMA_API_KEY on the runner or disable web search."
+        )
+
     system_extra = request.get("system_prompt")
     system_message = system_message_for(
         profile,
         str(system_extra) if system_extra else None,
         timezone=config.timezone,
         project=project,
+        effective_tool_ids=effective,
     )
 
     if include_ws:
@@ -236,14 +341,30 @@ async def _run_agent_async(
         timezone_name=config.timezone,
         calendar_client=calendar_client,
         job_id=job_id,
+        effective_tool_ids=effective,
+        ollama_api_key=config.ollama_api_key or None,
     )
 
     model_info = _model_info_for(str(model))
-    client = OllamaChatCompletionClient(
-        model=str(model),
-        host=config.ollama_base_url,
-        model_info=model_info,
-        timeout=config.job_timeout,
+    options: dict[str, Any] = {"num_predict": config.ollama_num_predict}
+    if config.ollama_num_ctx > 0:
+        options["num_ctx"] = config.ollama_num_ctx
+    ollama_kwargs: dict[str, Any] = {
+        "model": str(model),
+        "host": config.ollama_base_url,
+        "model_info": model_info,
+        "timeout": config.job_timeout,
+        "options": options,
+    }
+    if not config.ollama_think:
+        # Qwen3.x "thinking" models can burn the output budget before tool-call
+        # JSON finishes; Ollama then returns HTTP 500 (invalid tool arguments).
+        ollama_kwargs["think"] = False
+
+    task = _task_from_request(request)
+    client = _ownrun_ollama_client(
+        _fallback_user_query(request, task),
+        **ollama_kwargs,
     )
 
     agent = AssistantAgent(
@@ -257,7 +378,8 @@ async def _run_agent_async(
     )
 
     cancel_token = CancellationToken()
-    task = _task_from_request(request)
+    if config.ollama_num_ctx > 0:
+        log.info("Agent Ollama num_ctx=%s", config.ollama_num_ctx)
     trace: list[dict[str, Any]] = []
 
     start = time.monotonic()

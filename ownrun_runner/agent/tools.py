@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import socket
+import calendar
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
+
+import requests
 
 from ownrun_runner.client import ServerClient
 
@@ -23,6 +26,90 @@ WRITE_FILE_MAX = 64 * 1024
 LIST_DIR_MAX = 200
 FETCH_MAX = 256 * 1024
 FETCH_REDIRECTS = 3
+WEB_SEARCH_MAX_PER_JOB = 5
+WEB_SEARCH_QUERY_MAX = 200
+WEB_SEARCH_SNIPPET_MAX = 280
+OLLAMA_WEB_SEARCH_URL = "https://ollama.com/api/web_search"
+
+ALL_TOOL_IDS: tuple[str, ...] = (
+    "now",
+    "list_dir",
+    "read_file",
+    "write_file",
+    "http_fetch",
+    "web_search",
+    "calendar_search",
+    "calendar_get",
+    "calendar_add",
+    "calendar_edit",
+    "calendar_delete",
+    "journal_search",
+    "journal_get",
+    "journal_add",
+    "journal_edit",
+    "journal_delete",
+    "task_search",
+    "task_get",
+    "task_add",
+    "task_edit",
+    "task_delete",
+)
+
+SERVER_TOOL_IDS: frozenset[str] = frozenset(
+    {
+        "calendar_search",
+        "calendar_get",
+        "calendar_add",
+        "calendar_edit",
+        "calendar_delete",
+        "journal_search",
+        "journal_get",
+        "journal_add",
+        "journal_edit",
+        "journal_delete",
+        "task_search",
+        "task_get",
+        "task_add",
+        "task_edit",
+        "task_delete",
+    }
+)
+
+
+def all_tool_ids() -> list[str]:
+    return list(ALL_TOOL_IDS)
+
+
+def tools_for_profile(profile: str) -> frozenset[str]:
+    include_ws, include_web = profile_flags(profile)
+    ids: set[str] = {"now"} | set(SERVER_TOOL_IDS)
+    if include_ws:
+        ids.update({"list_dir", "read_file", "write_file"})
+    if include_web:
+        ids.update({"http_fetch", "web_search"})
+    return frozenset(ids)
+
+
+def runner_global_disabled(*, agent_web_search: bool) -> frozenset[str]:
+    if agent_web_search:
+        return frozenset()
+    return frozenset({"web_search"})
+
+
+def compute_effective_tools(
+    profile: str,
+    *,
+    agent_web_search: bool,
+    project_disabled: list[str] | None = None,
+    job_disabled: list[str] | None = None,
+) -> frozenset[str]:
+    base = tools_for_profile(profile)
+    disabled = set(runner_global_disabled(agent_web_search=agent_web_search))
+    if project_disabled:
+        disabled.update(str(x) for x in project_disabled)
+    if job_disabled:
+        disabled.update(str(x) for x in job_disabled)
+    return frozenset(t for t in base if t not in disabled)
 
 
 def truncate(text: str, limit: int = TOOL_RESULT_MAX) -> str:
@@ -198,6 +285,9 @@ def clock_payload(timezone_name: str, when: datetime | None = None) -> dict[str,
     week_end = week_start + timedelta(days=7)
     today_end = local_midnight + timedelta(days=1)
     next_7_end = local_midnight + timedelta(days=7)
+    month_start = local_midnight.replace(day=1)
+    month_last_day = calendar.monthrange(local.year, local.month)[1]
+    month_end = local_midnight.replace(day=month_last_day)
     return {
         "utc": _to_utc_z(utc),
         "timezone": timezone_name,
@@ -206,6 +296,10 @@ def clock_payload(timezone_name: str, when: datetime | None = None) -> dict[str,
         "today": {"start": _to_utc_z(local_midnight), "end": _to_utc_z(today_end)},
         "this_week": {"start": _to_utc_z(week_start), "end": _to_utc_z(week_end)},
         "next_7_days": {"start": _to_utc_z(local_midnight), "end": _to_utc_z(next_7_end)},
+        "this_month": {
+            "start": month_start.strftime("%Y-%m-%d"),
+            "end": month_end.strftime("%Y-%m-%d"),
+        },
     }
 
 
@@ -230,6 +324,8 @@ def build_tools(
     timezone_name: str = "America/New_York",
     calendar_client: ServerClient | None = None,
     job_id: int | None = None,
+    effective_tool_ids: frozenset[str] | None = None,
+    ollama_api_key: str | None = None,
 ) -> list[Callable[..., str]]:
     tools: list[Callable[..., str]] = []
 
@@ -377,8 +473,8 @@ def build_tools(
         def journal_search(start: str = "", end: str = "", query: str = "") -> str:
             """List journal entries between two civil dates (YYYY-MM-DD).
 
-            For 'this month' or 'recent', derive dates from now().local (first 10 chars are YYYY-MM-DD).
-            start and end are required ISO dates. Optional query filters title/body.
+            For 'this month', copy start/end from now().this_month or the system prompt.
+            If start and end are omitted, today is used. Optional query filters title/body.
             """
             try:
                 start_s = (start or "").strip()
@@ -743,6 +839,84 @@ def build_tools(
 
         tools.append(http_fetch)
 
+        if ollama_api_key:
+            search_budget = {"count": 0}
+            api_key = ollama_api_key
+
+            def web_search(query: str, max_results: int = 5) -> str:
+                """Search the public web via Ollama. Returns titles, URLs, and snippets only.
+
+                Args:
+                    query: Search query string.
+                    max_results: Number of hits to return (1–8, default 5).
+                """
+                if search_budget["count"] >= WEB_SEARCH_MAX_PER_JOB:
+                    return f"Error: search budget exceeded (max {WEB_SEARCH_MAX_PER_JOB} per job)"
+                search_budget["count"] += 1
+
+                q = (query or "").strip()
+                if not q:
+                    return "Error: query is required"
+                if len(q) > WEB_SEARCH_QUERY_MAX:
+                    q = q[:WEB_SEARCH_QUERY_MAX]
+
+                try:
+                    n = int(max_results)
+                except (TypeError, ValueError):
+                    n = 5
+                n = max(1, min(n, 8))
+
+                try:
+                    resp = requests.post(
+                        OLLAMA_WEB_SEARCH_URL,
+                        json={"query": q, "max_results": n},
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Accept": "application/json",
+                        },
+                        timeout=fetch_timeout,
+                    )
+                    if resp.status_code == 429:
+                        return "Error: search failed: rate limited by Ollama — try again later or upgrade account"
+                    if resp.status_code >= 400:
+                        detail = resp.text[:200]
+                        try:
+                            parsed = resp.json()
+                            if isinstance(parsed, dict) and parsed.get("error"):
+                                detail = str(parsed["error"])
+                        except ValueError:
+                            pass
+                        return f"Error: search failed: HTTP {resp.status_code}: {detail}"
+                    data = resp.json()
+                    raw_results = data.get("results") if isinstance(data, dict) else None
+                    if not isinstance(raw_results, list):
+                        raw_results = []
+                    hits: list[dict[str, str]] = []
+                    for item in raw_results:
+                        if not isinstance(item, dict):
+                            continue
+                        title = str(item.get("title") or "").strip()
+                        url = str(item.get("url") or "").strip()
+                        snippet = str(item.get("content") or item.get("snippet") or "").strip()
+                        if snippet and len(snippet) > WEB_SEARCH_SNIPPET_MAX:
+                            snippet = snippet[: WEB_SEARCH_SNIPPET_MAX - 1] + "…"
+                        parsed_url = urlparse(url)
+                        if parsed_url.scheme not in {"http", "https"}:
+                            continue
+                        hits.append({"title": title, "url": url, "snippet": snippet})
+                        if len(hits) >= n:
+                            break
+                    payload = {"query": q, "provider": "ollama", "results": hits}
+                    log.info("web_search job=%s hits=%d", job_id, len(hits))
+                    return truncate(json.dumps(payload, ensure_ascii=False))
+                except requests.RequestException as e:
+                    return f"Error: search failed: {e}"
+
+            tools.append(web_search)
+
+    if effective_tool_ids is not None:
+        tools = [t for t in tools if t.__name__ in effective_tool_ids]
+
     return tools
 
 
@@ -779,13 +953,35 @@ def system_message_for(
     *,
     timezone: str = "America/New_York",
     project: str | None = None,
+    effective_tool_ids: frozenset[str] | None = None,
 ) -> str:
     base = PROFILE_SYSTEM.get(profile, PROFILE_SYSTEM["workspace"])
+    if effective_tool_ids is not None and "web_search" in effective_tool_ids:
+        if profile == "web":
+            base = (
+                "You are OwnRun's web agent. Use web_search to find pages, then http_fetch "
+                "for public http(s) URLs. Do not invent page contents or URLs."
+            )
+        elif profile == "workspace_web":
+            base = (
+                "You are OwnRun's agent with project files, web search, and public HTTP fetch. "
+                "Use tools for facts. Paths are project-relative."
+            )
     clock = clock_payload(timezone)
     local_date = str(clock["local"])[:10]
     year = local_date[:4]
     project_label = project if project else "none (journal and task writes disabled)"
-    calendar = (
+    parts = [base]
+
+    calendar_ids = {
+        "calendar_search",
+        "calendar_get",
+        "calendar_add",
+        "calendar_edit",
+        "calendar_delete",
+    }
+    if effective_tool_ids is None or calendar_ids & effective_tool_ids:
+        calendar = (
         f"Today is {clock['weekday']}, {local_date} ({timezone}). "
         f"The current year is {year}. Use that date for 'today' / 'this week'; "
         "if the user names another year, search that year.\n"
@@ -799,20 +995,44 @@ def system_message_for(
         "(or unscoped if none). "
         "You can read unscoped events; you can only add/edit/delete this job's project "
         "(or unscoped events if this job has no project)."
-    )
-    journal = (
+        )
+        parts.append(calendar)
+
+    journal_ids = {
+        "journal_search",
+        "journal_get",
+        "journal_add",
+        "journal_edit",
+        "journal_delete",
+    }
+    if effective_tool_ids is None or journal_ids & effective_tool_ids:
+        journal = (
         "Journal tools (do not invent names): "
         "now, journal_search, journal_get, journal_add, journal_edit, journal_delete.\n"
         f"Today's civil date is {local_date}. Use YYYY-MM-DD for journal_search start/end "
         "and for journal_add entry_date.\n"
+        "For 'journal this month', call journal_search with these exact civil dates "
+        f"(or omit start/end): start={clock['this_month']['start']} "
+        f"end={clock['this_month']['end']}. "
+        "You may call now() if you need another window.\n"
         f"This job's project is {project_label}. "
         "You can read global (unscoped) journal entries for context. "
         "You can only add, edit, or soft-delete entries for this job's project; "
         "journal_add fails if this job has no project. "
         "Prefer journal_add at the end of a long task to record decisions; "
         "use journal_search before repeating prior work."
-    )
-    tasks = (
+        )
+        parts.append(journal)
+
+    task_ids = {
+        "task_search",
+        "task_get",
+        "task_add",
+        "task_edit",
+        "task_delete",
+    }
+    if effective_tool_ids is None or task_ids & effective_tool_ids:
+        tasks = (
         "Task tools (do not invent names): "
         "now, task_search, task_get, task_add, task_edit, task_delete.\n"
         f"Today's civil date is {local_date}. Use YYYY-MM-DD for due_date and "
@@ -824,8 +1044,18 @@ def system_message_for(
         "Prefer task_search (no args) before adding a duplicate; "
         "use task_edit with status=finished when the work is done; "
         "use task_add for follow-ups this project should not forget."
-    )
-    parts = [base, calendar, journal, tasks]
+        )
+        parts.append(tasks)
+
+    if effective_tool_ids is not None and "web_search" in effective_tool_ids:
+        web = (
+            "Web tools (do not invent names): web_search, http_fetch.\n"
+            "web_search returns titles, URLs, and snippets — not full page bodies. "
+            "Prefer one search, then http_fetch on one or two promising http(s) URLs.\n"
+            "http_fetch is GET-only and may refuse private or loopback hosts."
+        )
+        parts.append(web)
+
     if extra and extra.strip():
         parts.append(f"Additional instructions:\n{extra.strip()}")
     return "\n\n".join(parts)

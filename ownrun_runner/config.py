@@ -23,6 +23,11 @@ class Config:
     agent_wall_clock: float
     agent_fetch_timeout: float
     timezone: str
+    ollama_api_key: str
+    agent_web_search: bool
+    ollama_think: bool
+    ollama_num_predict: int
+    ollama_num_ctx: int
 
     @classmethod
     def from_env(cls) -> Config:
@@ -64,6 +69,13 @@ class Config:
             agent_wall_clock=float(os.environ.get("OWNRUN_AGENT_WALL_CLOCK", "1200")),
             agent_fetch_timeout=float(os.environ.get("OWNRUN_AGENT_FETCH_TIMEOUT", "15")),
             timezone=timezone,
+            ollama_api_key=(os.environ.get("OLLAMA_API_KEY") or "").strip(),
+            agent_web_search=os.environ.get("OWNRUN_AGENT_WEB_SEARCH", "1") != "0",
+            ollama_think=os.environ.get("OWNRUN_OLLAMA_THINK", "0") == "1",
+            ollama_num_predict=int(os.environ.get("OWNRUN_OLLAMA_NUM_PREDICT", "-1")),
+            # 0 = leave Ollama's model default (often 4096). Agent tool loops
+            # need more: truncation can drop the user turn and Qwen templates 500.
+            ollama_num_ctx=max(0, int(os.environ.get("OWNRUN_OLLAMA_NUM_CTX", "32768"))),
         )
 
     @property

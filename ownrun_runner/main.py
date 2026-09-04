@@ -9,7 +9,7 @@ from typing import Any
 from pathlib import Path
 
 from ownrun_runner.agent import agent_capable_models, run_agent_task
-from ownrun_runner.agent.tools import list_projects
+from ownrun_runner.agent.tools import all_tool_ids, list_projects
 from ownrun_runner.client import ServerClient
 from ownrun_runner.config import Config
 from ownrun_runner.ollama import list_models, run_ollama_chat
@@ -30,12 +30,15 @@ def _heartbeat_loop(client: ServerClient, config: Config) -> None:
             models = list_models(config)
             agent_models = agent_capable_models(models)
             projects = list_projects(Path(config.agent_workspace))
+            search_ready = config.agent_web_search and bool(config.ollama_api_key)
             client.heartbeat(
                 models,
                 agent_profiles=list(config.agent_profiles),
                 agent_models=agent_models,
                 agent_projects=projects,
                 timezone=config.timezone,
+                ollama_web_search=search_ready,
+                agent_tool_ids=all_tool_ids(),
             )
             log.debug(
                 "Heartbeat sent (%d models, %d agent-capable, %d projects, profiles=%s)",
