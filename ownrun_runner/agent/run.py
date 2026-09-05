@@ -307,6 +307,7 @@ async def _run_agent_async(
     effective = compute_effective_tools(
         profile,
         agent_web_search=config.agent_web_search,
+        agent_kb=config.agent_kb,
         project_disabled=project_disabled,
         job_disabled=job_disabled,
     )
@@ -343,6 +344,9 @@ async def _run_agent_async(
         job_id=job_id,
         effective_tool_ids=effective,
         ollama_api_key=config.ollama_api_key or None,
+        ollama_base_url=config.ollama_base_url,
+        kb_dir=config.kb_dir,
+        kb_embed_model=config.kb_embed_model,
     )
 
     model_info = _model_info_for(str(model))

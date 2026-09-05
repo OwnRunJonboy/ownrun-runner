@@ -10,6 +10,10 @@ def _default_workspace() -> str:
     return str(Path.home() / "ownrun-workspace")
 
 
+def _default_kb_dir() -> str:
+    return str(Path.home() / "ownrun-kb")
+
+
 @dataclass(frozen=True)
 class Config:
     server_url: str
@@ -28,6 +32,12 @@ class Config:
     ollama_think: bool
     ollama_num_predict: int
     ollama_num_ctx: int
+    kb_dir: str
+    kb_embed_model: str
+    kb_chunk_size: int
+    kb_chunk_overlap: int
+    kb_max_chunks_per_doc: int
+    agent_kb: bool
 
     @classmethod
     def from_env(cls) -> Config:
@@ -76,6 +86,12 @@ class Config:
             # 0 = leave Ollama's model default (often 4096). Agent tool loops
             # need more: truncation can drop the user turn and Qwen templates 500.
             ollama_num_ctx=max(0, int(os.environ.get("OWNRUN_OLLAMA_NUM_CTX", "32768"))),
+            kb_dir=os.environ.get("OWNRUN_KB_DIR", _default_kb_dir()),
+            kb_embed_model=(os.environ.get("OWNRUN_KB_EMBED_MODEL") or "nomic-embed-text").strip(),
+            kb_chunk_size=max(200, int(os.environ.get("OWNRUN_KB_CHUNK_SIZE", "1200"))),
+            kb_chunk_overlap=max(0, int(os.environ.get("OWNRUN_KB_CHUNK_OVERLAP", "200"))),
+            kb_max_chunks_per_doc=max(1, int(os.environ.get("OWNRUN_KB_MAX_CHUNKS_PER_DOC", "2000"))),
+            agent_kb=os.environ.get("OWNRUN_AGENT_KB", "1") != "0",
         )
 
     @property

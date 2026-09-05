@@ -12,6 +12,7 @@ from ownrun_runner.agent import agent_capable_models, run_agent_task
 from ownrun_runner.agent.tools import all_tool_ids, list_projects
 from ownrun_runner.client import ServerClient
 from ownrun_runner.config import Config
+from ownrun_runner.kb import run_kb_delete, run_kb_ingest
 from ownrun_runner.ollama import list_models, run_ollama_chat
 
 log = logging.getLogger(__name__)
@@ -116,6 +117,58 @@ def _process_job(client: ServerClient, config: Config, job: dict[str, Any]) -> N
                 result.get("stop_reason"),
                 result.get("iterations"),
             )
+        elif job_type == "kb.ingest":
+            def on_progress(partial: dict[str, Any]) -> None:
+                if cancel_flag.is_set():
+                    return
+                try:
+                    client.progress(job_id, partial)
+                except Exception as e:
+                    log.warning("Job #%s progress failed: %s", job_id, e)
+
+            try:
+                result = run_kb_ingest(
+                    config,
+                    request,
+                    job_id=job_id,
+                    client=client,
+                    on_progress=on_progress,
+                    should_cancel=cancel_flag.is_set,
+                )
+            except RuntimeError as e:
+                msg = str(e)
+                if msg == "cancelled" or cancel_flag.is_set():
+                    log.info("Job #%s cancelled", job_id)
+                    return
+                # Mark document failed before failing the job
+                doc_id = int(request.get("document_id") or 0)
+                if doc_id:
+                    try:
+                        client.kb_document_status(
+                            doc_id, {"status": "failed", "error_message": msg[:2000]}
+                        )
+                    except Exception as status_err:
+                        log.warning("Could not mark document failed: %s", status_err)
+                raise
+
+            if cancel_flag.is_set():
+                log.info("Job #%s cancelled; skipping complete", job_id)
+                return
+            client.complete(job_id, result)
+            log.info("Job #%s kb.ingest completed chunks=%s", job_id, result.get("chunk_count"))
+        elif job_type == "kb.delete":
+            result = run_kb_delete(
+                config,
+                request,
+                job_id=job_id,
+                client=client,
+                should_cancel=cancel_flag.is_set,
+            )
+            if cancel_flag.is_set():
+                log.info("Job #%s cancelled; skipping complete", job_id)
+                return
+            client.complete(job_id, result)
+            log.info("Job #%s kb.delete completed", job_id)
         else:
             raise RuntimeError(f"Unsupported job type: {job_type}")
     except Exception as e:
@@ -123,6 +176,15 @@ def _process_job(client: ServerClient, config: Config, job: dict[str, Any]) -> N
             log.info("Job #%s cancelled during error path: %s", job_id, e)
             return
         log.error("Job #%s failed: %s", job_id, e)
+        if job_type == "kb.ingest":
+            doc_id = int(request.get("document_id") or 0)
+            if doc_id:
+                try:
+                    client.kb_document_status(
+                        doc_id, {"status": "failed", "error_message": str(e)[:2000]}
+                    )
+                except Exception as status_err:
+                    log.warning("Could not mark document failed: %s", status_err)
         try:
             client.fail(job_id, str(e))
         except Exception as upload_err:

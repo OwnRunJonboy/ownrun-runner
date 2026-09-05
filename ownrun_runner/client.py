@@ -308,6 +308,78 @@ class ServerClient:
             retries=1,
         ) or {}
 
+    def kb_download_document(self, document_id: int) -> bytes:
+        last_error: Exception | None = None
+        path = f"/runner/kb/documents/{document_id}/content"
+        for attempt in range(3):
+            try:
+                resp = self.session.get(self._url(path), timeout=120)
+                if resp.status_code == 401:
+                    raise SystemExit("Runner authentication failed — check OWNRUN_RUNNER_TOKEN")
+                if 400 <= resp.status_code < 500:
+                    detail = resp.text
+                    try:
+                        parsed = resp.json()
+                        if isinstance(parsed, dict) and parsed.get("error"):
+                            detail = parsed["error"]
+                    except ValueError:
+                        pass
+                    raise requests.HTTPError(f"{resp.status_code}: {detail}", response=resp)
+                resp.raise_for_status()
+                return resp.content
+            except requests.HTTPError as e:
+                code = e.response.status_code if e.response is not None else 0
+                if 400 <= code < 500:
+                    raise
+                last_error = e
+                time.sleep(min(2**attempt, 30))
+            except requests.RequestException as e:
+                last_error = e
+                time.sleep(min(2**attempt, 30))
+        if last_error:
+            raise last_error
+        return b""
+
+    def kb_document_status(self, document_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/runner/kb/documents/{document_id}/status",
+            json=body,
+            retries=1,
+        ) or {}
+
+    def kb_purge_document(self, document_id: int) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/runner/kb/documents/{document_id}/purge",
+            json={},
+            retries=1,
+        ) or {}
+
+    def kb_purge_base(self, kb_id: int) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/runner/kb/{kb_id}/purge",
+            json={},
+            retries=1,
+        ) or {}
+
+    def kb_visible(self, job_id: int, kb: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] | None = {"kb": kb} if kb else None
+        return self._request(
+            "GET",
+            f"/runner/jobs/{job_id}/kb",
+            params=params,
+            retries=1,
+        ) or {}
+
+    def kb_get_document(self, job_id: int, document_id: int) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/runner/jobs/{job_id}/kb/documents/{document_id}",
+            retries=1,
+        ) or {}
+
     def _with_upload_retries(self, fn: Any) -> None:
         last_error: Exception | None = None
         for attempt in range(self.config.upload_retries):

@@ -43,6 +43,12 @@ Environment variables:
 | `OWNRUN_AGENT_FETCH_TIMEOUT` | no | `15` | HTTP fetch and web search timeout (seconds) |
 | `OLLAMA_API_KEY` | no | — | Bearer token for Ollama cloud web search (`https://ollama.com/api/web_search`) |
 | `OWNRUN_AGENT_WEB_SEARCH` | no | `1` | Set to `0` to disable `web_search` globally on this runner |
+| `OWNRUN_KB_DIR` | no | `~/ownrun-kb` | Persistent local vector index directory |
+| `OWNRUN_KB_EMBED_MODEL` | no | `nomic-embed-text` | Ollama embedding model for KB ingest/search |
+| `OWNRUN_KB_CHUNK_SIZE` | no | `1200` | Characters per chunk |
+| `OWNRUN_KB_CHUNK_OVERLAP` | no | `200` | Chunk overlap |
+| `OWNRUN_KB_MAX_CHUNKS_PER_DOC` | no | `2000` | Safety cap per document |
+| `OWNRUN_AGENT_KB` | no | `1` | Set to `0` to disable `kb_*` tools globally |
 
 ## Run
 
@@ -57,5 +63,6 @@ python run.py
 - Sends heartbeat every poll interval with Ollama models, agent profiles / tool-capable models, and known project directories
 - Claims one job at a time
 - Sends job heartbeats every 30s while running (response may request cancel)
-- Supports `ollama.chat` and `agent.task` jobs
+- Supports `ollama.chat`, `agent.task`, `kb.ingest`, and `kb.delete` jobs
 - Agent jobs use Autogen AgentChat + tools sandboxed to a selected **project** under `OWNRUN_AGENT_WORKSPACE`; progress traces upload while running
+- Knowledge base ingest parses PDF/DOCX/EPUB, embeds with Ollama, and stores vectors under `OWNRUN_KB_DIR`
