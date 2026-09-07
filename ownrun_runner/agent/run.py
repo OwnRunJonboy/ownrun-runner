@@ -304,12 +304,15 @@ async def _run_agent_async(
     if isinstance(job_disabled_raw, list):
         job_disabled = [str(x) for x in job_disabled_raw if str(x).strip()]
 
+    allow_http_fetch = bool(request.get("allow_http_fetch"))
+
     effective = compute_effective_tools(
         profile,
         agent_web_search=config.agent_web_search,
         agent_kb=config.agent_kb,
         project_disabled=project_disabled,
         job_disabled=job_disabled,
+        allow_http_fetch=allow_http_fetch,
     )
 
     if "web_search" in effective and not config.ollama_api_key:

@@ -83,6 +83,26 @@ SERVER_TOOL_IDS: frozenset[str] = frozenset(
     }
 )
 
+PERSONAL_DATA_TOOL_IDS: frozenset[str] = frozenset(
+    {
+        "calendar_search",
+        "calendar_get",
+        "calendar_add",
+        "calendar_edit",
+        "calendar_delete",
+        "journal_search",
+        "journal_get",
+        "journal_add",
+        "journal_edit",
+        "journal_delete",
+        "task_search",
+        "task_get",
+        "task_add",
+        "task_edit",
+        "task_delete",
+    }
+)
+
 
 def all_tool_ids() -> list[str]:
     return list(ALL_TOOL_IDS)
@@ -118,6 +138,7 @@ def compute_effective_tools(
     agent_kb: bool = True,
     project_disabled: list[str] | None = None,
     job_disabled: list[str] | None = None,
+    allow_http_fetch: bool = False,
 ) -> frozenset[str]:
     base = tools_for_profile(profile)
     disabled = set(runner_global_disabled(agent_web_search=agent_web_search, agent_kb=agent_kb))
@@ -125,7 +146,16 @@ def compute_effective_tools(
         disabled.update(str(x) for x in project_disabled)
     if job_disabled:
         disabled.update(str(x) for x in job_disabled)
-    return frozenset(t for t in base if t not in disabled)
+    effective = frozenset(t for t in base if t not in disabled)
+    # Personal-data tools + http_fetch is an explicit opt-in. A fetched page
+    # can instruct the model to send journal/calendar/task text off-box.
+    if (
+        "http_fetch" in effective
+        and effective & PERSONAL_DATA_TOOL_IDS
+        and not allow_http_fetch
+    ):
+        effective = frozenset(t for t in effective if t != "http_fetch")
+    return effective
 
 
 def truncate(text: str, limit: int = TOOL_RESULT_MAX) -> str:
@@ -1226,17 +1256,45 @@ def system_message_for(
     effective_tool_ids: frozenset[str] | None = None,
 ) -> str:
     base = PROFILE_SYSTEM.get(profile, PROFILE_SYSTEM["workspace"])
-    if effective_tool_ids is not None and "web_search" in effective_tool_ids:
+    if effective_tool_ids is not None:
+        has_fetch = "http_fetch" in effective_tool_ids
+        has_search = "web_search" in effective_tool_ids
         if profile == "web":
-            base = (
-                "You are OwnRun's web agent. Use web_search to find pages, then http_fetch "
-                "for public http(s) URLs. Do not invent page contents or URLs."
-            )
+            if has_search and has_fetch:
+                base = (
+                    "You are OwnRun's web agent. Use web_search to find pages, then http_fetch "
+                    "for public http(s) URLs. Do not invent page contents or URLs."
+                )
+            elif has_search:
+                base = (
+                    "You are OwnRun's web agent. Use web_search to find pages. "
+                    "You do not have http_fetch on this job; do not invent page bodies or fetch URLs."
+                )
+            elif has_fetch:
+                base = PROFILE_SYSTEM["web"]
+            else:
+                base = (
+                    "You are OwnRun's web agent. HTTP fetch is not enabled on this job. "
+                    "Do not invent page contents or URLs."
+                )
         elif profile == "workspace_web":
-            base = (
-                "You are OwnRun's agent with project files, web search, and public HTTP fetch. "
-                "Use tools for facts. Paths are project-relative."
-            )
+            if has_search and has_fetch:
+                base = (
+                    "You are OwnRun's agent with project files, web search, and public HTTP fetch. "
+                    "Use tools for facts. Paths are project-relative."
+                )
+            elif has_search:
+                base = (
+                    "You are OwnRun's agent with project files and web search. "
+                    "You do not have http_fetch on this job. Paths are project-relative."
+                )
+            elif has_fetch:
+                base = PROFILE_SYSTEM["workspace_web"]
+            else:
+                base = (
+                    "You are OwnRun's agent with project files. "
+                    "HTTP fetch is not enabled on this job. Paths are project-relative."
+                )
     clock = clock_payload(timezone)
     local_date = str(clock["local"])[:10]
     year = local_date[:4]
@@ -1331,13 +1389,29 @@ def system_message_for(
         )
         parts.append(kb)
 
-    if effective_tool_ids is not None and "web_search" in effective_tool_ids:
-        web = (
-            "Web tools (do not invent names): web_search, http_fetch.\n"
-            "web_search returns titles, URLs, and snippets — not full page bodies. "
-            "Prefer one search, then http_fetch on one or two promising http(s) URLs.\n"
-            "http_fetch is GET-only and may refuse private or loopback hosts."
-        )
+    if effective_tool_ids is not None and (
+        "web_search" in effective_tool_ids or "http_fetch" in effective_tool_ids
+    ):
+        has_search = "web_search" in effective_tool_ids
+        has_fetch = "http_fetch" in effective_tool_ids
+        if has_search and has_fetch:
+            web = (
+                "Web tools (do not invent names): web_search, http_fetch.\n"
+                "web_search returns titles, URLs, and snippets — not full page bodies. "
+                "Prefer one search, then http_fetch on one or two promising http(s) URLs.\n"
+                "http_fetch is GET-only and may refuse private or loopback hosts."
+            )
+        elif has_search:
+            web = (
+                "Web tools (do not invent names): web_search.\n"
+                "web_search returns titles, URLs, and snippets — not full page bodies. "
+                "http_fetch is not available on this job; do not retrieve page contents."
+            )
+        else:
+            web = (
+                "Web tools (do not invent names): http_fetch.\n"
+                "http_fetch is GET-only and may refuse private or loopback hosts."
+            )
         parts.append(web)
 
     if extra and extra.strip():
