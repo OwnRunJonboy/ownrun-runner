@@ -2,6 +2,12 @@
 # OwnRun runner launcher — uses the project venv so KB parsers (ebooklib, etc.) are available.
 cd "$(dirname "$0")" || exit 1
 
+export OWNRUN_SD_ENABLED=1
+export OWNRUN_OLLAMA_START_SCRIPT="$HOME/bin/start-ollama.sh"
+export OWNRUN_OLLAMA_STOP_SCRIPT="$HOME/bin/stop-ollama.sh"
+export OWNRUN_SD_START_SCRIPT="$HOME/bin/start-sd.sh"
+export OWNRUN_SD_STOP_SCRIPT="$HOME/bin/stop-sd.sh"
+
 export OWNRUN_SERVER_URL="${OWNRUN_SERVER_URL:-http://localhost/~jonboy/ownrun-server}"
 export OWNRUN_RUNNER_TOKEN="${OWNRUN_RUNNER_TOKEN:-8c3f944e9daa77d826acfc80534018e3281571a61a641a5cbf3bd2809b54ee66}"
 export OLLAMA_API_KEY="${OLLAMA_API_KEY:-464075d570864723bd0ff2023912db30.zOltd9ejRMykrF9tT-NOJb2f}"

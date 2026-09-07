@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -94,6 +95,10 @@ class ServerClient:
         timezone: str | None = None,
         ollama_web_search: bool | None = None,
         agent_tool_ids: list[str] | None = None,
+        backend_state: str | None = None,
+        sd_available: bool | None = None,
+        sd_models: list[str] | None = None,
+        ollama_models_stale: bool | None = None,
     ) -> None:
         body: dict[str, Any] = {}
         if models is not None:
@@ -110,6 +115,14 @@ class ServerClient:
             body["ollama_web_search"] = ollama_web_search
         if agent_tool_ids is not None:
             body["agent_tool_ids"] = agent_tool_ids
+        if backend_state is not None:
+            body["backend_state"] = backend_state
+        if sd_available is not None:
+            body["sd_available"] = sd_available
+        if sd_models is not None:
+            body["sd_models"] = sd_models
+        if ollama_models_stale is not None:
+            body["ollama_models_stale"] = ollama_models_stale
         self._request("POST", "/runner/heartbeat", json=body)
 
     def tool_policy(self, job_id: int) -> list[str]:
@@ -152,6 +165,60 @@ class ServerClient:
                 json={"error_message": error_message},
             )
         )
+
+    def upload_artifact(
+        self,
+        job_id: int,
+        path: Path,
+        *,
+        content_type: str = "image/png",
+        filename: str | None = None,
+    ) -> dict[str, Any]:
+        name = filename or path.name
+
+        def _do() -> dict[str, Any]:
+            with path.open("rb") as fh:
+                headers = {
+                    k: v
+                    for k, v in self.session.headers.items()
+                    if k.lower() != "content-type"
+                }
+                resp = requests.post(
+                    self._url(f"/runner/jobs/{job_id}/artifacts"),
+                    headers=headers,
+                    files={"file": (name, fh, content_type)},
+                    timeout=120,
+                )
+            if resp.status_code == 401:
+                raise SystemExit("Runner authentication failed — check OWNRUN_RUNNER_TOKEN")
+            if 400 <= resp.status_code < 500:
+                detail = resp.text
+                try:
+                    parsed = resp.json()
+                    if isinstance(parsed, dict) and parsed.get("error"):
+                        detail = parsed["error"]
+                except ValueError:
+                    pass
+                raise requests.HTTPError(f"{resp.status_code}: {detail}", response=resp)
+            resp.raise_for_status()
+            data = resp.json()
+            artifact = data.get("artifact") if isinstance(data, dict) else None
+            if not isinstance(artifact, dict) or "id" not in artifact:
+                raise RuntimeError(f"Unexpected artifact upload response: {data!r}")
+            return artifact
+
+        last_error: Exception | None = None
+        for attempt in range(self.config.upload_retries):
+            try:
+                return _do()
+            except Exception as e:
+                last_error = e
+                wait = min(2**attempt, 30)
+                log.warning("Artifact upload failed, retry in %ss: %s", wait, e)
+                time.sleep(wait)
+        if last_error:
+            raise last_error
+        raise RuntimeError("Artifact upload failed")
 
     def calendar_search(
         self,

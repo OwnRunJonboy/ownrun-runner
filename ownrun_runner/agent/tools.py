@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import calendar
+import http.client
 import ipaddress
 import json
 import logging
 import re
 import socket
-import calendar
+import ssl
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import urldefrag, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -256,24 +258,53 @@ def _is_public_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
-def _assert_public_url(url: str) -> None:
-    parsed = urlparse(url)
+@dataclass(frozen=True)
+class PublicTarget:
+    url: str
+    hostname: str
+    port: int
+    scheme: str
+    ip: str
+    request_path: str
+
+
+_REDIRECT_STATUS = frozenset({301, 302, 303, 307, 308})
+
+
+def resolve_public_url(url: str) -> PublicTarget:
+    """Validate a URL and pin the first public IP from this DNS lookup.
+
+    Every address returned for the host must be public. The caller must
+    connect to ``ip`` and must not resolve the hostname again.
+    """
+    cleaned, _frag = urldefrag((url or "").strip())
+    if not cleaned:
+        raise ValueError("URL missing host")
+    parsed = urlparse(cleaned)
     if parsed.scheme not in ("http", "https"):
         raise ValueError("Only http and https URLs are allowed")
     host = parsed.hostname
     if not host:
         raise ValueError("URL missing host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URL must not include credentials")
     if host.lower() in {"localhost", "metadata.google.internal"}:
         raise ValueError("Host is not allowed")
 
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
     try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as e:
         raise ValueError(f"DNS resolution failed: {e}") from e
 
     if not infos:
         raise ValueError("DNS resolution returned no addresses")
 
+    pinned: str | None = None
     for info in infos:
         ip_str = info[4][0]
         try:
@@ -282,6 +313,114 @@ def _assert_public_url(url: str) -> None:
             continue
         if not _is_public_ip(ip):
             raise ValueError(f"Refusing non-public address {ip_str}")
+        if pinned is None:
+            pinned = ip.compressed
+    if pinned is None:
+        raise ValueError("DNS resolution returned no addresses")
+
+    return PublicTarget(
+        url=cleaned,
+        hostname=host,
+        port=port,
+        scheme=parsed.scheme,
+        ip=pinned,
+        request_path=path,
+    )
+
+
+def _assert_public_url(url: str) -> None:
+    resolve_public_url(url)
+
+
+def _host_header(hostname: str, port: int, scheme: str) -> str:
+    default = 443 if scheme == "https" else 80
+    host = hostname
+    if ":" in hostname and not hostname.startswith("["):
+        host = f"[{hostname}]"
+    if port != default:
+        return f"{host}:{port}"
+    return host
+
+
+def http_get_pinned(target: PublicTarget, timeout: float) -> tuple[int, dict[str, str], bytes]:
+    """GET *target* by connecting to the pinned IP. Does not follow redirects.
+
+    TLS SNI and certificate verification use the URL hostname, not the IP.
+    """
+    sock = socket.create_connection((target.ip, target.port), timeout=timeout)
+    try:
+        if target.scheme == "https":
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(sock, server_hostname=target.hostname)
+        conn = http.client.HTTPConnection(target.hostname, target.port, timeout=timeout)
+        conn.sock = sock
+        sock = None
+        try:
+            conn.request(
+                "GET",
+                target.request_path,
+                headers={
+                    "Host": _host_header(target.hostname, target.port, target.scheme),
+                    "User-Agent": "OwnRun-agent/1.0",
+                    "Accept": "text/*,application/json,application/xml",
+                    "Connection": "close",
+                },
+            )
+            resp = conn.getresponse()
+            headers = {k.lower(): v for k, v in resp.getheaders()}
+            body = resp.read(FETCH_MAX + 1)
+            return resp.status, headers, body
+        finally:
+            conn.close()
+    finally:
+        if sock is not None:
+            sock.close()
+
+
+def _decode_fetch_body(raw: bytes, content_type: str) -> str:
+    if len(raw) > FETCH_MAX:
+        return f"Error: response larger than {FETCH_MAX} bytes"
+    if content_type.startswith("image/") or content_type in {
+        "application/octet-stream",
+        "application/pdf",
+        "application/zip",
+    }:
+        return f"Error: unsupported content type {content_type or 'unknown'}"
+    if b"\x00" in raw[:4096] and not content_type.startswith("text/"):
+        return "Error: binary response rejected"
+    text = raw.decode("utf-8", errors="replace")
+    if (
+        "html" in content_type
+        or text.lstrip().lower().startswith("<!doctype html")
+        or "<html" in text[:200].lower()
+    ):
+        text = _html_to_text(text)
+    return truncate(text)
+
+
+def fetch_public_url(
+    url: str,
+    timeout: float,
+    *,
+    get: Callable[[PublicTarget, float], tuple[int, dict[str, str], bytes]] | None = None,
+) -> str:
+    """GET a public URL, re-validating and pinning each redirect hop."""
+    getter = get or http_get_pinned
+    current = url
+    for _ in range(FETCH_REDIRECTS + 1):
+        target = resolve_public_url(current)
+        status, headers, raw = getter(target, timeout)
+        if status in _REDIRECT_STATUS:
+            location = (headers.get("location") or "").strip()
+            if not location:
+                return "Error: redirect without Location"
+            if len(location) > 2048:
+                return "Error: invalid redirect Location"
+            current = urljoin(target.url, location)
+            continue
+        content_type = (headers.get("content-type") or "").split(";")[0].strip().lower()
+        return _decode_fetch_body(raw, content_type)
+    return "Error: too many redirects"
 
 
 def _to_utc_z(dt: datetime) -> str:
@@ -961,39 +1100,8 @@ def build_tools(
             Args:
                 url: Absolute http or https URL.
             """
-            current = url.strip()
             try:
-                for _ in range(FETCH_REDIRECTS + 1):
-                    _assert_public_url(current)
-                    req = Request(
-                        current,
-                        method="GET",
-                        headers={"User-Agent": "OwnRun-agent/1.0", "Accept": "text/*,application/json,application/xml"},
-                    )
-                    with urlopen(req, timeout=fetch_timeout) as resp:  # noqa: S310 — SSRF checked above
-                        if 300 <= getattr(resp, "status", 200) < 400:
-                            location = resp.headers.get("Location")
-                            if not location:
-                                return "Error: redirect without Location"
-                            current = location
-                            continue
-                        content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-                        raw = resp.read(FETCH_MAX + 1)
-                        if len(raw) > FETCH_MAX:
-                            return f"Error: response larger than {FETCH_MAX} bytes"
-                        if content_type.startswith("image/") or content_type in {
-                            "application/octet-stream",
-                            "application/pdf",
-                            "application/zip",
-                        }:
-                            return f"Error: unsupported content type {content_type or 'unknown'}"
-                        if b"\x00" in raw[:4096] and not content_type.startswith("text/"):
-                            return "Error: binary response rejected"
-                        text = raw.decode("utf-8", errors="replace")
-                        if "html" in content_type or text.lstrip().lower().startswith("<!doctype html") or "<html" in text[:200].lower():
-                            text = _html_to_text(text)
-                        return truncate(text)
-                return "Error: too many redirects"
+                return fetch_public_url(url.strip(), fetch_timeout)
             except ValueError as e:
                 return f"Error: {e}"
             except Exception as e:

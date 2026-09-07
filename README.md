@@ -49,6 +49,17 @@ Environment variables:
 | `OWNRUN_KB_CHUNK_OVERLAP` | no | `200` | Chunk overlap |
 | `OWNRUN_KB_MAX_CHUNKS_PER_DOC` | no | `2000` | Safety cap per document |
 | `OWNRUN_AGENT_KB` | no | `1` | Set to `0` to disable `kb_*` tools globally |
+| `OWNRUN_SD_ENABLED` | no | `0` | Set to `1` to enable image jobs + exclusive Ollama↔Forge gate |
+| `OWNRUN_SD_BASE_URL` | no | `http://127.0.0.1:7860` | Forge / A1111 API base |
+| `OWNRUN_OLLAMA_START_SCRIPT` | if SD on | — | Executable that starts Ollama |
+| `OWNRUN_OLLAMA_STOP_SCRIPT` | if SD on | — | Executable that stops Ollama |
+| `OWNRUN_SD_START_SCRIPT` | if SD on | — | Executable that starts Forge |
+| `OWNRUN_SD_STOP_SCRIPT` | if SD on | — | Executable that stops Forge |
+| `OWNRUN_BACKEND_SCRIPT_TIMEOUT_SEC` | no | `60` | Max seconds for a start/stop script to exit |
+| `OWNRUN_BACKEND_STOP_TIMEOUT_SEC` | no | `60` | Wait for API down after stop |
+| `OWNRUN_BACKEND_START_TIMEOUT_SEC` | no | `180` | Wait for API up after start |
+| `OWNRUN_SD_JOB_TIMEOUT_SEC` | no | `600` | txt2img HTTP timeout |
+| `OWNRUN_BACKEND_IDLE` | no | `ollama` | Backend to start on runner boot (`ollama` or `stablediffusion`) |
 
 ## Run
 
@@ -58,11 +69,31 @@ export OWNRUN_RUNNER_TOKEN=your-runner-token
 python run.py
 ```
 
+### Image generation (Forge)
+
+Ollama and Forge must not run at the same time on this laptop. With `OWNRUN_SD_ENABLED=1`, the runner fully stops one stack before starting the other via **your** scripts.
+
+```bash
+mkdir -p ~/ownrun-scripts
+cp scripts/examples/*.sh ~/ownrun-scripts/
+chmod +x ~/ownrun-scripts/*.sh
+# Edit start-sd.sh FORGE_DIR; adjust start/stop-ollama.sh for your setup
+
+export OWNRUN_SD_ENABLED=1
+export OWNRUN_OLLAMA_START_SCRIPT=$HOME/ownrun-scripts/start-ollama.sh
+export OWNRUN_OLLAMA_STOP_SCRIPT=$HOME/ownrun-scripts/stop-ollama.sh
+export OWNRUN_SD_START_SCRIPT=$HOME/ownrun-scripts/start-sd.sh
+export OWNRUN_SD_STOP_SCRIPT=$HOME/ownrun-scripts/stop-sd.sh
+```
+
+Do not manually start Forge while Ollama is up (or the reverse). Let OwnRun own the switch.
+
 ## Behavior
 
-- Sends heartbeat every poll interval with Ollama models, agent profiles / tool-capable models, and known project directories
+- Sends heartbeat every poll interval with Ollama models, agent profiles / tool-capable models, known project directories, and (when enabled) `backend_state` / `sd_models`
 - Claims one job at a time
 - Sends job heartbeats every 30s while running (response may request cancel)
-- Supports `ollama.chat`, `agent.task`, `kb.ingest`, and `kb.delete` jobs
+- Supports `ollama.chat`, `agent.task`, `kb.ingest`, `kb.delete`, and `stablediffusion.txt2img` jobs
 - Agent jobs use Autogen AgentChat + tools sandboxed to a selected **project** under `OWNRUN_AGENT_WORKSPACE`; progress traces upload while running
 - Knowledge base ingest parses PDF/DOCX/EPUB, embeds with Ollama, and stores vectors under `OWNRUN_KB_DIR`
+- Image jobs call Forge `/sdapi/v1/txt2img`, upload PNG artifacts, and leave Forge warm until the next Ollama job
