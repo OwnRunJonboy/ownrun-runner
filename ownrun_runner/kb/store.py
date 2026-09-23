@@ -29,6 +29,12 @@ class Chunk:
     section_title: str | None = None
 
 
+SUPPORTED_FORMATS = frozenset({"pdf", "docx", "epub", "md", "txt"})
+
+_ATX_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*\s*$")
+_SETEXT_UNDERLINE = re.compile(r"^(=+|-+)[ \t]*$")
+
+
 def parse_document(path: Path, format: str) -> list[ParsedSection]:
     fmt = format.lower().strip()
     if fmt == "pdf":
@@ -37,6 +43,10 @@ def parse_document(path: Path, format: str) -> list[ParsedSection]:
         return _parse_docx(path)
     if fmt == "epub":
         return _parse_epub(path)
+    if fmt == "md":
+        return _parse_md(path)
+    if fmt == "txt":
+        return _parse_txt(path)
     raise ValueError(f"Unsupported format: {format}")
 
 
@@ -148,6 +158,95 @@ def _parse_epub(path: Path) -> list[ParsedSection]:
         title = Path(name).stem
         sections.append(ParsedSection(text=text, chapter=title or f"chapter-{chapter_i}"))
     return sections
+
+
+def _parse_txt(path: Path) -> list[ParsedSection]:
+    text = _normalize_text(_decode_text(path.read_bytes()))
+    if not text:
+        return []
+    return [ParsedSection(text=text)]
+
+
+def _parse_md(path: Path) -> list[ParsedSection]:
+    text = _strip_markdown_front_matter(_decode_text(path.read_bytes()))
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    sections: list[ParsedSection] = []
+    current_title: str | None = None
+    parts: list[str] = []
+
+    def flush() -> None:
+        nonlocal parts
+        body = _normalize_text("\n".join(parts))
+        if body:
+            sections.append(ParsedSection(text=body, section_title=current_title))
+        parts = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        atx = _ATX_HEADING.match(line)
+        if atx and not _in_fence(lines, i):
+            flush()
+            current_title = atx.group(2).strip()
+            parts.append(current_title)
+            i += 1
+            continue
+        if _is_setext_heading(lines, i):
+            flush()
+            current_title = line.strip()
+            parts.append(current_title)
+            i += 2
+            continue
+        parts.append(line)
+        i += 1
+    flush()
+    return sections
+
+
+def _decode_text(raw: bytes) -> str:
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16")
+    if b"\x00" in raw[:400]:
+        for encoding in ("utf-16", "utf-16-le", "utf-16-be"):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+    return raw.decode("utf-8-sig", errors="replace")
+
+
+def _strip_markdown_front_matter(text: str) -> str:
+    if not text.startswith("---"):
+        return text
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return text
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return "".join(lines[i + 1 :])
+    return text
+
+
+def _in_fence(lines: list[str], index: int) -> bool:
+    fence: str | None = None
+    for line in lines[:index]:
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            fence = None if fence == marker else marker
+    return fence is not None
+
+
+def _is_setext_heading(lines: list[str], index: int) -> bool:
+    if index + 1 >= len(lines) or not lines[index].strip():
+        return False
+    if _in_fence(lines, index):
+        return False
+    underline = lines[index + 1].strip()
+    if len(underline) < 3 or _SETEXT_UNDERLINE.match(lines[index + 1]) is None:
+        return False
+    return set(underline) <= {"="} or set(underline) <= {"-"}
 
 
 def _normalize_text(text: str) -> str:

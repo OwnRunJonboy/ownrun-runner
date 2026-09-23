@@ -9,6 +9,7 @@ from typing import Any, Callable
 from ownrun_runner.client import ServerClient
 from ownrun_runner.config import Config
 from ownrun_runner.kb.store import (
+    SUPPORTED_FORMATS,
     KbVectorStore,
     chunk_sections,
     embed_texts,
@@ -16,6 +17,14 @@ from ownrun_runner.kb.store import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _empty_extract_message(fmt: str) -> str:
+    if fmt == "md":
+        return "markdown file has no extractable text"
+    if fmt == "txt":
+        return "text file is empty"
+    return "no extractable text (OCR not supported in v1)"
 
 
 def _store(config: Config) -> KbVectorStore:
@@ -36,7 +45,7 @@ def run_kb_ingest(
     kb_id = int(request.get("kb_id") or 0)
     fmt = str(request.get("format") or "").lower()
     embed_model = str(request.get("embedding_model") or config.kb_embed_model).strip()
-    if not doc_id or not kb_id or fmt not in {"pdf", "docx", "epub"}:
+    if not doc_id or not kb_id or fmt not in SUPPORTED_FORMATS:
         raise RuntimeError("Invalid kb.ingest request payload")
 
     def cancelled() -> bool:
@@ -53,9 +62,7 @@ def run_kb_ingest(
 
         sections = parse_document(path, fmt)
         if not sections:
-            raise RuntimeError(
-                "no extractable text (OCR not supported in v1)"
-            )
+            raise RuntimeError(_empty_extract_message(fmt))
 
         chunks = chunk_sections(
             sections,
@@ -64,9 +71,7 @@ def run_kb_ingest(
             max_chunks=config.kb_max_chunks_per_doc,
         )
         if not chunks:
-            raise RuntimeError(
-                "no extractable text (OCR not supported in v1)"
-            )
+            raise RuntimeError(_empty_extract_message(fmt))
 
         page_count = max((s.page or 0 for s in sections), default=0) or None
         chapter_count = len({s.chapter for s in sections if s.chapter}) or None

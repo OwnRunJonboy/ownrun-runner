@@ -95,5 +95,5 @@ Do not manually start Forge while Ollama is up (or the reverse). Let OwnRun own 
 - Sends job heartbeats every 30s while running (response may request cancel)
 - Supports `ollama.chat`, `agent.task`, `kb.ingest`, `kb.delete`, and `stablediffusion.txt2img` jobs
 - Agent jobs use Autogen AgentChat + tools sandboxed to a selected **project** under `OWNRUN_AGENT_WORKSPACE`; progress traces upload while running
-- Knowledge base ingest parses PDF/DOCX/EPUB, embeds with Ollama, and stores vectors under `OWNRUN_KB_DIR`
+- Knowledge base ingest parses PDF/DOCX/EPUB/Markdown/TXT, embeds with Ollama, and stores vectors under `OWNRUN_KB_DIR`
 - Image jobs call Forge `/sdapi/v1/txt2img`, upload PNG artifacts, and leave Forge warm until the next Ollama job
