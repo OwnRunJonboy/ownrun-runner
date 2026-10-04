@@ -97,3 +97,7 @@ Do not manually start Forge while Ollama is up (or the reverse). Let OwnRun own 
 - Agent jobs use Autogen AgentChat + tools sandboxed to a selected **project** under `OWNRUN_AGENT_WORKSPACE`; progress traces upload while running
 - Knowledge base ingest parses PDF/DOCX/EPUB/Markdown/TXT, embeds with Ollama, and stores vectors under `OWNRUN_KB_DIR`
 - Image jobs call Forge `/sdapi/v1/txt2img`, upload PNG artifacts, and leave Forge warm until the next Ollama job
+
+## License
+
+OwnRun is distributed under the [GNU Affero General Public License v3](COPYING.txt) (AGPL-3.0).
